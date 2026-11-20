@@ -1,0 +1,63 @@
+name: Build IPA (unsigned)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      SHASHA_CREDIT: ${{ secrets.SHASHA_CREDIT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          {
+            echo "== xcode"; xcodebuild -version
+            brew install xcodegen
+            xcodegen generate
+            pod install --repo-update
+            xcodebuild -workspace ShashaIOS.xcworkspace -scheme ShashaIOS -configuration Release \
+              -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" SHASHA_CREDIT="$SHASHA_CREDIT" build
+          } 2>&1 | tee all.log
+
+      - name: Package IPA
+        if: steps.build.outcome == 'success'
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/ShashaIOS.app Payload/
+          zip -qry Shasha-unsigned.ipa Payload
+          ls -la Shasha-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: steps.build.outcome == 'success'
+        with:
+          name: Shasha-unsigned-ipa
+          path: Shasha-unsigned.ipa
+          retention-days: 3
+
+      # Short result + errors on the ci-logs branch (read by the developer with git, no API needed).
+      - name: Publish build summary
+        if: always()
+        run: |
+          {
+            echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }}"
+            echo "== errors"; grep -E "error:|fatal error|Undefined symbol|ld: |\*\* BUILD|\[!\]" all.log | head -200 || true
+            echo "== tail"; tail -60 all.log || true
+          } > ci-summary.txt
+          git config user.name "shasha-ci"; git config user.email "ci@users.noreply.github.com"
+          git checkout --orphan ci-logs-tmp
+          git rm -rf --cached . > /dev/null
+          git add -f ci-summary.txt
+          git commit -qm "build $GITHUB_RUN_NUMBER: ${{ steps.build.outcome }}"
+          git push -qf origin HEAD:ci-logs
