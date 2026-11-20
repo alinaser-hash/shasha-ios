@@ -8,6 +8,9 @@ struct MoviesView: View {
     @Binding var play: PlayItem?
     @State private var cat: String?
     @State private var query = ""
+    @AppStorage("sort.movies") private var sort: VodSort = .newest
+    @State private var mine = false
+    @State private var tick = 0
 
     var body: some View {
         NavigationStack {
@@ -26,8 +29,10 @@ struct MoviesView: View {
                     }
                 }
                 Chips(cats: library.vodCats, selected: $cat).padding(.vertical, 6)
-                let list = library.movies.filter { (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
-                    .sorted { $0.added > $1.added }
+                let _ = tick
+                let list = sortedMovies(library.movies.filter { (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
+                    && (!mine || Store.isFavorite("movie:" + $0.id)) })
+                if mine && list.isEmpty { Text("قائمتك فارغة — افتح فيلمًا واضغط ☆ لإضافته.").foregroundStyle(.secondary).padding() }
                 LazyVGrid(columns: grid, spacing: 16) {
                     ForEach(list) { m in
                         NavigationLink { MovieDetail(movie: m, play: $play) } label: { PosterCard(title: m.name, poster: m.poster) }.buttonStyle(.plain)
@@ -35,9 +40,48 @@ struct MoviesView: View {
                 }.padding(.horizontal)
             }
             .searchable(text: $query, prompt: "بحث في الأفلام")
-            .navigationTitle("الأفلام")
+            .navigationTitle(mine ? "قائمتي · الأفلام" : "الأفلام")
+            .toolbar { ToolbarItem(placement: .navigationBarLeading) { SortMenu(sort: $sort, mine: $mine) } }
             .refreshable { await library.reload() }
+            .onAppear { tick += 1 }
         }
+    }
+
+    private func sortedMovies(_ l: [Movie]) -> [Movie] {
+        switch sort {
+        case .newest: return l.sorted { $0.added > $1.added }
+        case .rating: return l.sorted { ratingValue($0.rating) > ratingValue($1.rating) }
+        case .name: return l.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+    }
+}
+
+/// Sort order + "my list only", shared by Movies and Series.
+struct SortMenu: View {
+    @Binding var sort: VodSort
+    @Binding var mine: Bool
+    var body: some View {
+        Menu {
+            Picker("الترتيب", selection: $sort) {
+                ForEach(VodSort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            Toggle(isOn: $mine) { Label("قائمتي فقط", systemImage: "star") }
+        } label: {
+            Image(systemName: mine ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+        }
+    }
+}
+
+/// Star button that adds/removes a title from "my list".
+struct FavButton: View {
+    let key: String
+    @State private var on = false
+    var body: some View {
+        Button { Store.toggleFavorite(key); on = Store.isFavorite(key) } label: {
+            Image(systemName: on ? "star.fill" : "star").foregroundStyle(Theme.accent)
+        }
+        .accessibilityLabel(on ? "إزالة من قائمتي" : "إضافة إلى قائمتي")
+        .onAppear { on = Store.isFavorite(key) }
     }
 }
 
@@ -70,6 +114,7 @@ struct MovieDetail: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .navigationBarTrailing) { FavButton(key: "movie:" + movie.id) } }
         .task { if let x = library.xtream { info = await x.movieInfo(movie.id) } }
     }
 }
@@ -80,14 +125,19 @@ struct SeriesView: View {
     @Binding var play: PlayItem?
     @State private var cat: String?
     @State private var query = ""
+    @AppStorage("sort.series") private var sort: VodSort = .newest
+    @State private var mine = false
+    @State private var tick = 0
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 LoadingOrError()
                 Chips(cats: library.seriesCats, selected: $cat).padding(.vertical, 6)
-                let list = library.shows.filter { (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
-                    .sorted { $0.updated > $1.updated }
+                let _ = tick
+                let list = sortedShows(library.shows.filter { (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
+                    && (!mine || Store.isFavorite("show:" + $0.id)) })
+                if mine && list.isEmpty { Text("قائمتك فارغة — افتح مسلسلًا واضغط ☆ لإضافته.").foregroundStyle(.secondary).padding() }
                 LazyVGrid(columns: grid, spacing: 16) {
                     ForEach(list) { s in
                         NavigationLink { SeriesDetail(show: s, play: $play) } label: { PosterCard(title: s.name, poster: s.poster) }.buttonStyle(.plain)
@@ -95,8 +145,18 @@ struct SeriesView: View {
                 }.padding(.horizontal)
             }
             .searchable(text: $query, prompt: "بحث في المسلسلات")
-            .navigationTitle("المسلسلات")
+            .navigationTitle(mine ? "قائمتي · المسلسلات" : "المسلسلات")
+            .toolbar { ToolbarItem(placement: .navigationBarLeading) { SortMenu(sort: $sort, mine: $mine) } }
             .refreshable { await library.reload() }
+            .onAppear { tick += 1 }
+        }
+    }
+
+    private func sortedShows(_ l: [Show]) -> [Show] {
+        switch sort {
+        case .newest: return l.sorted { $0.updated > $1.updated }
+        case .rating: return l.sorted { ratingValue($0.rating) > ratingValue($1.rating) }
+        case .name: return l.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
     }
 }
@@ -143,6 +203,7 @@ struct SeriesDetail: View {
             }
         }
         .navigationTitle(show.name).navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .navigationBarTrailing) { FavButton(key: "show:" + show.id) } }
         .task {
             guard let x = library.xtream else { loading = false; return }
             episodes = (try? await x.episodes(seriesId: show.id)) ?? []

@@ -64,6 +64,27 @@ struct MovieInfo {
     var backdrop: String?
 }
 
+/// What is on a live channel now (Xtream short EPG).
+struct EPGNow {
+    let title: String
+    let start: Date
+    let end: Date
+    let next: String?
+    var progress: Double {
+        let total = max(1, end.timeIntervalSince(start))
+        return max(0, min(1, Date().timeIntervalSince(start) / total))
+    }
+}
+
+/// Sort order for movies and series.
+enum VodSort: String, CaseIterable {
+    case newest = "الأحدث"
+    case rating = "الأعلى تقييمًا"
+    case name = "أبجدي"
+}
+
+func ratingValue(_ s: String?) -> Double { Double(s ?? "") ?? 0 }
+
 /// Loose JSON helpers: Xtream servers send numbers as strings and strings as numbers.
 enum J {
     static func s(_ v: Any?) -> String? {

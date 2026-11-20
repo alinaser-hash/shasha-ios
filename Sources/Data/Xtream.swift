@@ -103,6 +103,25 @@ struct Xtream {
         return out.sorted { ($0.season, $0.number) < ($1.season, $1.number) }
     }
 
+    /// Now / next for one channel. Titles come base64-encoded on most servers.
+    func shortEPG(_ streamId: String) async -> EPGNow? {
+        guard let d = try? await api("get_short_epg", ["stream_id": streamId, "limit": "3"]) as? [String: Any],
+              let rows = d["epg_listings"] as? [[String: Any]] else { return nil }
+        func text(_ v: Any?) -> String {
+            let raw = J.s(v) ?? ""
+            if let data = Data(base64Encoded: raw), let t = String(data: data, encoding: .utf8), !t.isEmpty { return t }
+            return raw
+        }
+        let items: [(title: String, start: Date, end: Date)] = rows.compactMap { e in
+            let st = J.i(e["start_timestamp"]), en = J.i(e["stop_timestamp"])
+            guard st > 0, en > st else { return nil }
+            return (text(e["title"]), Date(timeIntervalSince1970: TimeInterval(st)), Date(timeIntervalSince1970: TimeInterval(en)))
+        }.sorted { $0.start < $1.start }
+        let now = Date()
+        guard let i = items.firstIndex(where: { $0.start <= now && now < $0.end }) else { return nil }
+        return EPGNow(title: items[i].title, start: items[i].start, end: items[i].end, next: i + 1 < items.count ? items[i + 1].title : nil)
+    }
+
     func movieInfo(_ id: String) async -> MovieInfo {
         guard let d = try? await api("get_vod_info", ["vod_id": id]) as? [String: Any], let info = d["info"] as? [String: Any] else { return MovieInfo() }
         let backdrop = (info["backdrop_path"] as? [Any])?.first.flatMap { J.s($0) } ?? J.s(info["backdrop_path"])

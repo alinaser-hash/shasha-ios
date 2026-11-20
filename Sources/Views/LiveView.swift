@@ -27,6 +27,7 @@ struct LiveView: View {
 
 struct ChannelList: View {
     @EnvironmentObject var library: Library
+    @EnvironmentObject var epg: EPG
     let title: String
     let filter: (Channel) -> Bool
     @Binding var play: PlayItem?
@@ -39,11 +40,18 @@ struct ChannelList: View {
             Button { play = .live(list: list, index: i) } label: {
                 HStack(spacing: 12) {
                     Art(url: ch.logo, fit: true).frame(width: 56, height: 36).background(Theme.surface, in: RoundedRectangle(cornerRadius: 6))
-                    Text(ch.name).lineLimit(2).foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(ch.name).lineLimit(1).foregroundStyle(.primary)
+                        if let n = epg.now[ch.id] {
+                            Text(n.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            ProgressView(value: n.progress).tint(Theme.teal).frame(maxWidth: 160)
+                        }
+                    }
                     Spacer()
                     if Store.isFavorite(ch.id) { Image(systemName: "star.fill").foregroundStyle(Theme.accent) }
                 }
             }
+            .task(id: ch.id) { epg.load(ch, from: library.xtream) }
             .swipeActions { Button { Store.toggleFavorite(ch.id); favTick += 1 } label: { Label("مفضلة", systemImage: "star") }.tint(Theme.accent) }
             .contextMenu { Button { Store.toggleFavorite(ch.id); favTick += 1 } label: { Label(Store.isFavorite(ch.id) ? "إزالة من المفضلة" : "إضافة للمفضلة", systemImage: "star") } }
         }

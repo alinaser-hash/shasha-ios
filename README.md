@@ -15,5 +15,7 @@ A short build summary (result + errors) is pushed to the `ci-logs` branch (`ci-s
 - Live TV: groups, favourites (swipe / long press), search, channel up/down in the player.
 - Movies: continue watching, categories, newest first, details (plot, genre, year), resume.
 - Series: recently updated first, seasons/episodes, resume next episode.
-- Player: VLCKit, audio/subtitle track menu, ±10 s, seek bar, landscape.
+- Live: now-playing programme and progress on each channel (Xtream short EPG), shown in the player too.
+- Movies/Series: sort (newest / top rated / A–Z), "my list" (☆ on the details page, filter in the sort menu).
+- Player: VLCKit, audio/subtitle track menu, ±10 s buttons and double tap, seek bar, picture shape (fit / fill / 16:9 / 4:3), speed, screen stays awake, retry button when a stream drops (no automatic reconnect loop).
 - About: credit line comes from the `SHASHA_CREDIT` Actions secret at build time (not stored in the source).

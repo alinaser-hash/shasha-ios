@@ -10,11 +10,13 @@ enum Theme {
 @main
 struct ShashaApp: App {
     @StateObject private var library = Library()
+    @StateObject private var epg = EPG()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(library)
+                .environmentObject(epg)
                 .environment(\.layoutDirection, .rightToLeft)
                 .environment(\.locale, Locale(identifier: "ar"))
                 .preferredColorScheme(.dark)
@@ -25,6 +27,7 @@ struct ShashaApp: App {
 
 struct RootView: View {
     @EnvironmentObject var library: Library
+    @EnvironmentObject var epg: EPG
     @State private var play: PlayItem?
 
     var body: some View {
@@ -40,7 +43,8 @@ struct RootView: View {
                 }
             }
         }
-        .fullScreenCover(item: $play) { PlayerScreen(item: $0) }
+        .fullScreenCover(item: $play) { PlayerScreen(item: $0).environmentObject(library).environmentObject(epg) }
+        .onChange(of: library.activeId) { _ in epg.clear() }
         .task { if !library.sources.isEmpty && library.channels.isEmpty && library.movies.isEmpty { await library.reload() } }
     }
 }

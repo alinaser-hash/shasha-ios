@@ -96,6 +96,25 @@ final class Library: ObservableObject {
     private func clear() { liveCats = []; channels = []; vodCats = []; movies = []; seriesCats = []; shows = [] }
 }
 
+/// Now-playing programme per channel, fetched lazily for the rows on screen (Xtream only).
+@MainActor
+final class EPG: ObservableObject {
+    @Published private(set) var now: [String: EPGNow] = [:]
+    private var asked: [String: Date] = [:]
+
+    func load(_ ch: Channel, from x: Xtream?) {
+        guard let x else { return }
+        if let n = now[ch.id], n.end > Date() { return }
+        if let a = asked[ch.id], Date().timeIntervalSince(a) < 120 { return }
+        asked[ch.id] = Date()
+        Task {
+            if let r = await x.shortEPG(ch.id) { now[ch.id] = r }
+        }
+    }
+
+    func clear() { now = [:]; asked = [:] }
+}
+
 /// Resume points and favourites (on this phone).
 enum Store {
     private static var d: UserDefaults { .standard }

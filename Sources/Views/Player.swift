@@ -22,10 +22,16 @@ final class PlayerModel: ObservableObject {
     @Published var lengthMs: Int32 = 0
     @Published var playing = false
     @Published var buffering = true
+    /// The stream stopped by itself (server dropped it or it never opened).
+    @Published var failed = false
+    @Published var rate: Float = 1
     private var timer: Timer?
+    private var live = false
 
-    func open(_ url: String, startSeconds: Double = 0) {
+    func open(_ url: String, startSeconds: Double = 0, live: Bool = false) {
         guard let u = URL(string: url) else { return }
+        self.live = live
+        failed = false
         let m = VLCMedia(url: u)
         m.addOption(":network-caching=1500")
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -41,6 +47,25 @@ final class PlayerModel: ObservableObject {
         lengthMs = (player.media as VLCMedia?)?.length.intValue ?? 0
         playing = player.isPlaying
         buffering = player.state == .buffering || player.state == .opening
+        if player.state == .error || (live && player.state == .ended) { failed = true; buffering = false }
+    }
+
+    func setRate(_ r: Float) { player.rate = r; rate = r }
+
+    enum Fit: String, CaseIterable { case fit = "ملاءمة", fill = "ملء الشاشة", wide = "16:9", classic = "4:3" }
+
+    /// Picture shape. VLC copies the strings it is given.
+    func apply(_ f: Fit) {
+        player.videoAspectRatio = nil
+        player.videoCropGeometry = nil
+        switch f {
+        case .fit: break
+        case .fill:
+            let b = UIScreen.main.bounds
+            player.videoCropGeometry = strdup("\(Int(max(b.width, b.height))):\(Int(min(b.width, b.height)))")
+        case .wide: player.videoAspectRatio = strdup("16:9")
+        case .classic: player.videoAspectRatio = strdup("4:3")
+        }
     }
 
     func toggle() { player.isPlaying ? player.pause() : player.play() }
@@ -74,11 +99,15 @@ struct VLCView: UIViewRepresentable {
 
 struct PlayerScreen: View {
     let item: PlayItem
+    @EnvironmentObject var library: Library
+    @EnvironmentObject var epg: EPG
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = PlayerModel()
     @State private var controls = true
     @State private var index = 0
     @State private var hideTask: Task<Void, Never>?
+    @State private var fit: PlayerModel.Fit = .fit
+    @State private var flash: Int32 = 0
 
     private var title: String {
         switch item {
@@ -92,22 +121,63 @@ struct PlayerScreen: View {
         ZStack {
             Color.black.ignoresSafeArea()
             VLCView(model: model).ignoresSafeArea()
-                .onTapGesture { controls.toggle(); scheduleHide() }
-            if model.buffering { ProgressView().tint(.white).scaleEffect(1.6) }
+            // Tap: show/hide controls. Double tap on the left/right half: −10 / +10 s (films and episodes).
+            HStack(spacing: 0) { tapZone(-10); tapZone(10) }
+                .environment(\.layoutDirection, .leftToRight)
+                .ignoresSafeArea()
+            if model.buffering && !model.failed { ProgressView().tint(.white).scaleEffect(1.6) }
+            if flash != 0 {
+                Label(flash > 0 ? "+10" : "−10", systemImage: flash > 0 ? "goforward.10" : "gobackward.10")
+                    .font(.title2.bold()).padding(14).background(.black.opacity(0.55), in: Capsule()).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: flash > 0 ? .trailing : .leading).padding(.horizontal, 60)
+                    .environment(\.layoutDirection, .leftToRight)
+                    .allowsHitTesting(false)
+            }
             if controls { overlay }
+            if model.failed {
+                VStack(spacing: 12) {
+                    Text(isLive ? "انقطع البث." : "تعذّر تشغيل الملف.").font(.headline)
+                    HStack {
+                        Button("إعادة المحاولة") { retry() }.buttonStyle(.borderedProminent)
+                        Button("إغلاق") { dismiss() }.buttonStyle(.bordered)
+                    }
+                }
+                .padding(20).background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white)
+            }
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .onAppear { start() ; Orientation.landscape() }
-        .onDisappear { saveResume(); model.stop(); Orientation.portrait() }
+        .onAppear { start(); Orientation.landscape(); UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear { saveResume(); model.stop(); Orientation.portrait(); UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    private func tapZone(_ seconds: Int32) -> some View {
+        Color.clear.contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                guard !isLive else { return }
+                model.jump(seconds); flash = seconds
+                Task { try? await Task.sleep(nanoseconds: 700_000_000); await MainActor.run { flash = 0 } }
+            }
+            .onTapGesture { controls.toggle(); scheduleHide() }
+    }
+
+    private var nowOnAir: EPGNow? {
+        guard case .live(let l, _) = item, l.indices.contains(index) else { return nil }
+        return epg.now[l[index].id]
     }
 
     private var overlay: some View {
         VStack {
             HStack {
                 Button { dismiss() } label: { Image(systemName: "xmark").font(.title2.bold()).padding(12) }
-                Text(title).font(.headline).lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline).lineLimit(1)
+                    if let n = nowOnAir {
+                        Text(n.next.map { "الآن: \(n.title) · التالي: \($0)" } ?? "الآن: \(n.title)").font(.caption).lineLimit(1).opacity(0.85)
+                    }
+                }
                 Spacer()
+                pictureMenu
                 trackMenu
             }
             .padding(.horizontal).background(.black.opacity(0.45))
@@ -140,6 +210,26 @@ struct PlayerScreen: View {
         .foregroundStyle(.white)
     }
 
+    private var pictureMenu: some View {
+        Menu {
+            Section("شكل الصورة") {
+                ForEach(PlayerModel.Fit.allCases, id: \.self) { f in
+                    Button { fit = f; model.apply(f) } label: { if fit == f { Label(f.rawValue, systemImage: "checkmark") } else { Text(f.rawValue) } }
+                }
+            }
+            if !isLive {
+                Section("السرعة") {
+                    ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { r in
+                        Button { model.setRate(r) } label: {
+                            let t = r == 1 ? "عادية" : String(format: "%gx", r)
+                            if model.rate == r { Label(t, systemImage: "checkmark") } else { Text(t) }
+                        }
+                    }
+                }
+            }
+        } label: { Image(systemName: "aspectratio").font(.title2).padding(12) }
+    }
+
     private var trackMenu: some View {
         Menu {
             Section("الصوت") {
@@ -153,7 +243,7 @@ struct PlayerScreen: View {
 
     private func start() {
         switch item {
-        case .live(let l, let i): index = i; model.open(l[i].url)
+        case .live(let l, let i): index = i; model.open(l[i].url, live: true); epg.load(l[i], from: library.xtream)
         case .vod(_, let url, let key): model.open(url, startSeconds: Store.position(key)?.pos ?? 0)
         }
         scheduleHide()
@@ -162,7 +252,18 @@ struct PlayerScreen: View {
     private func change(_ d: Int) {
         guard case .live(let l, _) = item, !l.isEmpty else { return }
         index = (index + d + l.count) % l.count
-        model.open(l[index].url)
+        model.open(l[index].url, live: true)
+        epg.load(l[index], from: library.xtream)
+        scheduleHide()
+    }
+
+    /// One manual retry, started by the viewer (no automatic reconnect loop).
+    private func retry() {
+        switch item {
+        case .live(let l, _): model.open(l[index].url, live: true)
+        case .vod(_, let url, _): model.open(url, startSeconds: Double(model.timeMs) / 1000)
+        }
+        if fit != .fit { model.apply(fit) }
         scheduleHide()
     }
 
