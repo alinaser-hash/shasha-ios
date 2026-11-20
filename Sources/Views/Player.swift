@@ -1,18 +1,28 @@
 import SwiftUI
 import UIKit
 import MobileVLCKit
+import MediaPlayer
 
 /// What to play: a live channel inside its list (◀▶ switch channels) or a film/episode with a resume key.
 enum PlayItem: Identifiable {
     case live(list: [Channel], index: Int)
-    case vod(title: String, url: String, key: String)
+    case vod(VodPlay)
 
     var id: String {
         switch self {
         case .live(let l, let i): return "live:" + l[i].id
-        case .vod(_, _, let k): return "vod:" + k
+        case .vod(let v): return "vod:" + v.key
         }
     }
+}
+
+/// A film or an episode. `next` holds the following episodes of the same series (empty for films).
+struct VodPlay: Hashable {
+    let title: String
+    let url: String
+    let key: String
+    var query: SubQuery
+    var next: [VodPlay] = []
 }
 
 /// VLCKit player state, polled twice a second (simple and robust across VLCKit versions).
@@ -32,6 +42,7 @@ final class PlayerModel: ObservableObject {
         guard let u = URL(string: url) else { return }
         self.live = live
         failed = false
+        subDelay = 0
         let m = VLCMedia(url: u)
         m.addOption(":network-caching=1500")
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -51,6 +62,43 @@ final class PlayerModel: ObservableObject {
     }
 
     func setRate(_ r: Float) { player.rate = r; rate = r }
+
+    /// Subtitle delay in seconds (VLC stores microseconds). Positive = later.
+    @Published var subDelay: Double = 0
+    func shiftSubs(_ d: Double) {
+        subDelay = d == 0 ? 0 : (subDelay + d)
+        player.currentVideoSubTitleDelay = Int(subDelay * 1_000_000)
+    }
+
+    /// Adds a downloaded subtitle file and switches to it.
+    func addSubtitle(_ file: URL) {
+        player.addPlaybackSlave(file, type: .subtitle, enforce: true)
+    }
+
+    // Lock screen / Control Center.
+    private var remoteTargets: [Any] = []
+    func nowPlaying(_ title: String) {
+        var info: [String: Any] = [MPMediaItemPropertyTitle: title]
+        if lengthMs > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = Double(lengthMs) / 1000
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(timeMs) / 1000
+        }
+        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? Double(rate) : 0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        guard remoteTargets.isEmpty else { return }
+        let c = MPRemoteCommandCenter.shared()
+        remoteTargets = [
+            c.playCommand.addTarget { [weak self] _ in self?.player.play(); return .success },
+            c.pauseCommand.addTarget { [weak self] _ in self?.player.pause(); return .success },
+            c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success },
+        ]
+    }
+    private func clearRemote() {
+        let c = MPRemoteCommandCenter.shared()
+        for t in remoteTargets { c.playCommand.removeTarget(t); c.pauseCommand.removeTarget(t); c.togglePlayPauseCommand.removeTarget(t) }
+        remoteTargets = []
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
 
     enum Fit: String, CaseIterable { case fit = "ملاءمة", fill = "ملء الشاشة", wide = "16:9", classic = "4:3" }
 
@@ -72,7 +120,7 @@ final class PlayerModel: ObservableObject {
     func jump(_ seconds: Int32) { seconds > 0 ? player.jumpForward(seconds) : player.jumpBackward(-seconds) }
     func seek(fraction: Double) { player.position = Float(max(0, min(1, fraction))) }
 
-    func stop() { timer?.invalidate(); timer = nil; player.stop() }
+    func stop() { timer?.invalidate(); timer = nil; player.stop(); clearRemote() }
 
     struct Track: Identifiable { let id: Int32; let name: String }
 
@@ -108,11 +156,16 @@ struct PlayerScreen: View {
     @State private var hideTask: Task<Void, Never>?
     @State private var fit: PlayerModel.Fit = .fit
     @State private var flash: Int32 = 0
+    /// The film/episode now playing (moves forward with "next episode").
+    @State private var vod: VodPlay?
+    @State private var subsSheet = false
+    @State private var notice: String?
+    @State private var advancedAt = Date.distantPast
 
     private var title: String {
         switch item {
         case .live(let l, _): return l[index].name
-        case .vod(let t, _, _): return t
+        case .vod(let v): return vod?.title ?? v.title
         }
     }
     private var isLive: Bool { if case .live = item { return true } else { return false } }
@@ -134,6 +187,19 @@ struct PlayerScreen: View {
                     .allowsHitTesting(false)
             }
             if controls { overlay }
+            if let n = nextUp, nearEnd, !model.failed {
+                Button { playNext() } label: {
+                    Label("الحلقة التالية", systemImage: "forward.end.fill").font(.headline).padding(.horizontal, 18).padding(.vertical, 12)
+                        .background(Theme.accent, in: Capsule()).foregroundStyle(.black)
+                }
+                .accessibilityHint(n.title)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing).padding(28)
+                .environment(\.layoutDirection, .leftToRight)
+            }
+            if let notice {
+                Text(notice).font(.callout).padding(12).background(.black.opacity(0.75), in: Capsule()).foregroundStyle(.white)
+                    .frame(maxHeight: .infinity, alignment: .top).padding(.top, 70).allowsHitTesting(false)
+            }
             if model.failed {
                 VStack(spacing: 12) {
                     Text(isLive ? "انقطع البث." : "تعذّر تشغيل الملف.").font(.headline)
@@ -144,6 +210,15 @@ struct PlayerScreen: View {
                 }
                 .padding(20).background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white)
             }
+        }
+        .sheet(isPresented: $subsSheet) {
+            if let v = vod {
+                SubSearchSheet(query: v.query) { file in model.addSubtitle(file); show("تمت إضافة الترجمة") }
+            }
+        }
+        .onReceive(model.$timeMs) { _ in
+            if !isLive { model.nowPlaying(title) }
+            if !isLive, model.player.state == .ended, nextUp != nil, !model.failed, Date().timeIntervalSince(advancedAt) > 5 { playNext() }
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
@@ -236,7 +311,19 @@ struct PlayerScreen: View {
                 ForEach(model.audioTracks) { t in Button(t.name) { model.player.currentAudioTrackIndex = t.id } }
             }
             Section("الترجمة") {
-                ForEach(model.subtitleTracks) { t in Button(t.name) { model.player.currentVideoSubTitleIndex = t.id } }
+                ForEach(model.subtitleTracks) { t in
+                    Button { model.player.currentVideoSubTitleIndex = t.id } label: {
+                        if model.player.currentVideoSubTitleIndex == t.id { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
+                    }
+                }
+                if !isLive {
+                    Button { subsSheet = true } label: { Label("ترجمة من الإنترنت…", systemImage: "globe") }
+                }
+            }
+            Section("توقيت الترجمة: \(model.subDelay == 0 ? "بدون تعديل" : String(format: "%+.1f ث", model.subDelay))") {
+                Button { model.shiftSubs(-0.5); show(delayText) } label: { Label("أبكر ٠٫٥ ث", systemImage: "minus.circle") }
+                Button { model.shiftSubs(0.5); show(delayText) } label: { Label("أتأخر ٠٫٥ ث", systemImage: "plus.circle") }
+                if model.subDelay != 0 { Button { model.shiftSubs(0); show(delayText) } label: { Label("إرجاع التوقيت", systemImage: "arrow.uturn.backward") } }
             }
         } label: { Image(systemName: "captions.bubble").font(.title2).padding(12) }
     }
@@ -244,7 +331,7 @@ struct PlayerScreen: View {
     private func start() {
         switch item {
         case .live(let l, let i): index = i; model.open(l[i].url, live: true); epg.load(l[i], from: library.xtream)
-        case .vod(_, let url, let key): model.open(url, startSeconds: Store.position(key)?.pos ?? 0)
+        case .vod(let v): vod = v; model.open(v.url, startSeconds: Store.position(v.key)?.pos ?? 0)
         }
         scheduleHide()
     }
@@ -261,15 +348,43 @@ struct PlayerScreen: View {
     private func retry() {
         switch item {
         case .live(let l, _): model.open(l[index].url, live: true)
-        case .vod(_, let url, _): model.open(url, startSeconds: Double(model.timeMs) / 1000)
+        case .vod: if let v = vod { model.open(v.url, startSeconds: Double(model.timeMs) / 1000) }
         }
         if fit != .fit { model.apply(fit) }
         scheduleHide()
     }
 
     private func saveResume() {
-        guard case .vod(_, _, let key) = item, model.lengthMs > 0 else { return }
-        Store.setPosition(key, Double(model.timeMs) / 1000, Double(model.lengthMs) / 1000)
+        guard let v = vod, model.lengthMs > 0 else { return }
+        Store.setPosition(v.key, Double(model.timeMs) / 1000, Double(model.lengthMs) / 1000)
+    }
+
+    private var nextUp: VodPlay? { vod?.next.first }
+    /// Last 40 seconds of an episode (or it already ended).
+    private var nearEnd: Bool {
+        model.player.state == .ended || (model.lengthMs > 60_000 && model.lengthMs - model.timeMs < 40_000)
+    }
+
+    /// Marks the current episode watched and starts the next one, keeping the rest of the queue.
+    private func playNext() {
+        guard let cur = vod, var n = cur.next.first else { return }
+        advancedAt = Date()
+        Store.setPosition(cur.key, 1, 1)
+        n.next = Array(cur.next.dropFirst())
+        vod = n
+        model.open(n.url, startSeconds: Store.position(n.key)?.pos ?? 0)
+        if fit != .fit { model.apply(fit) }
+        show(n.title)
+        scheduleHide()
+    }
+
+    private var delayText: String {
+        model.subDelay == 0 ? "توقيت الترجمة الأصلي" : String(format: "تأخير الترجمة %+.1f ث", model.subDelay)
+    }
+
+    private func show(_ text: String) {
+        notice = text
+        Task { try? await Task.sleep(nanoseconds: 1_800_000_000); await MainActor.run { if notice == text { notice = nil } } }
     }
 
     private func scheduleHide() {

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 enum Theme {
     static let bg = Color(red: 14 / 255, green: 20 / 255, blue: 27 / 255)
@@ -11,6 +12,12 @@ enum Theme {
 struct ShashaApp: App {
     @StateObject private var library = Library()
     @StateObject private var epg = EPG()
+
+    init() {
+        // Sound even with the silent switch on, and keep audio when the screen locks.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
 
     var body: some Scene {
         WindowGroup {

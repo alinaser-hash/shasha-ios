@@ -29,6 +29,7 @@ struct SettingsView: View {
                     Button { adding = true } label: { Label("إضافة قائمة", systemImage: "plus") }
                     Button { Task { await library.reload() } } label: { Label("تحديث القائمة الآن", systemImage: "arrow.clockwise") }
                 }
+                SubsSettingsSection()
                 Section("حول التطبيق") {
                     HStack { Text("الإصدار"); Spacer(); Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") }
                     Text(credit).foregroundStyle(Theme.accent).bold()

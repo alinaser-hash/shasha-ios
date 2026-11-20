@@ -126,8 +126,7 @@ enum Store {
 
     /// Saved until 95 % watched, then cleared (watched).
     static func setPosition(_ key: String, _ pos: Double, _ dur: Double) {
-        if dur > 0 && pos / dur > 0.95 { d.removeObject(forKey: "pos." + key); return }
-        d.set([pos, dur], forKey: "pos." + key)
+        if dur > 0 && pos / dur > 0.95 { d.removeObject(forKey: "pos." + key) } else { d.set([pos, dur], forKey: "pos." + key) }
         var recent = d.stringArray(forKey: "recent") ?? []
         recent.removeAll { $0 == key }; recent.insert(key, at: 0)
         d.set(Array(recent.prefix(60)), forKey: "recent")
