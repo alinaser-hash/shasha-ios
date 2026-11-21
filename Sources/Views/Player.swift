@@ -43,6 +43,11 @@ final class PlayerModel: ObservableObject {
     var mpvLab: MPVLab = .normal
     /// Set when the viewer asks for picture in picture while on mpv: switch to VLC, then start it when VLC is ready.
     var pipWhenReady = false
+    /// Picture in picture for mpv (avfoundation output into a sample-buffer layer, 0.9.3).
+    let mpvPiP = MPVPiP()
+    /// Called when mpv's picture in picture can't be used (old libmpv or iOS refused): the screen falls back to VLC.
+    var onMPVPiPUnavailable: ((String) -> Void)?
+    private var pipAttempt = 0
 
     /// Changes the engine; the caller reopens the item at the same point.
     func use(_ e: Engine) {
@@ -61,6 +66,23 @@ final class PlayerModel: ObservableObject {
     @Published var pipActive = false
 
     init() {
+        mpvPiP.isPaused = { [weak self] in self?.viewerPaused ?? true }
+        mpvPiP.setPlaying = { [weak self] on in self?.command(on ? .play : .pause) }
+        mpvPiP.skip = { [weak self] s in self?.jump(Int32(s)) }
+        mpvPiP.duration = { [weak self] in Double(self?.lengthMs ?? 0) / 1000 }
+        mpvPiP.isLive = { [weak self] in self?.live ?? false }
+        mpvPiP.onActive = { [weak self] on in
+            guard let self else { return }
+            DiagLog.shared.note("[التطبيق] صورة داخل صورة (mpv): \(on ? "بدأت" : "انتهت")")
+            self.pipActive = on
+            if !on { self.mpv.setPiPOutput(false, pipLayer: self.mpvPiP.view.displayLayer) }
+        }
+        mpvPiP.onFailed = { [weak self] msg in
+            guard let self else { return }
+            self.mpv.note("[مرحلة] صورة داخل صورة رفضها النظام: \(msg)")
+            self.mpv.setPiPOutput(false, pipLayer: self.mpvPiP.view.displayLayer)
+            self.onMPVPiPUnavailable?(msg)
+        }
         videoView.backgroundColor = .black
         plainView.backgroundColor = .black
         videoView.player = player
@@ -85,14 +107,48 @@ final class PlayerModel: ObservableObject {
     }
 
     func togglePiP() {
+        if engine == .mpv {
+            if pipActive { mpvPiP.controller?.stopPictureInPicture() } else { startMPVPiP() }
+            return
+        }
         guard let c = videoView.windowController else { return }
         if pipActive { c.stopPictureInPicture() } else { c.startPictureInPicture() }
     }
 
     func startPiPIfPossible() {
+        if engine == .mpv { if !pipActive, playing { startMPVPiP() }; return }
         guard engine == .vlc, !pipActive, playing, let c = videoView.windowController else { return }
         c.startPictureInPicture()
     }
+    /// mpv picture in picture: switch the output to the sample-buffer layer, wait for its first frames, then start.
+    func startMPVPiP() {
+        guard let c = mpvPiP.controller else { onMPVPiPUnavailable?("الجهاز لا يدعم صورة داخل صورة"); return }
+        mpvPiP.sync(timeS: Double(timeMs) / 1000, playing: !viewerPaused, rate: rate)
+        mpv.setPiPOutput(true, pipLayer: mpvPiP.view.displayLayer)
+        pipAttempt += 1
+        let attempt = pipAttempt
+        func poll(_ n: Int) {
+            guard attempt == pipAttempt, !pipActive else { return }
+            if mpv.pipOutputFailed {
+                mpv.setPiPOutput(false, pipLayer: mpvPiP.view.displayLayer)
+                onMPVPiPUnavailable?("مخرج avfoundation غير متاح في mpv")
+                return
+            }
+            if mpv.pipOutputReady && c.isPictureInPicturePossible {
+                mpv.note("[مرحلة] صورة داخل صورة: بدء النافذة")
+                c.startPictureInPicture()
+                return
+            }
+            if n >= 40 {
+                mpv.setPiPOutput(false, pipLayer: mpvPiP.view.displayLayer)
+                onMPVPiPUnavailable?("لم تجهز صورة داخل صورة خلال 4 ثوانٍ (المخرج: \(mpv.pipOutputReady ? "جاهز" : "غير جاهز")، النظام: \(c.isPictureInPicturePossible ? "يسمح" : "لا يسمح"))")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { poll(n + 1) }
+        }
+        poll(0)
+    }
+
     /// Values that change twice a second live in `clock`, observed only by the few small views that show them.
     /// Otherwise the whole player (and any open menu) would redraw on every tick: menus jumped under the finger.
     let clock = PlayerClock()
@@ -132,14 +188,21 @@ final class PlayerModel: ObservableObject {
     func attachDrawable() {
         if engine == .mpv {
             videoView.removeFromSuperview(); plainView.removeFromSuperview()
-            if let host = hostView, mpv.view.superview !== host {
-                mpv.view.frame = host.bounds
-                mpv.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                host.addSubview(mpv.view)
+            if let host = hostView {
+                if mpvPiP.view.superview !== host {
+                    mpvPiP.view.frame = host.bounds
+                    mpvPiP.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                    host.insertSubview(mpvPiP.view, at: 0)     // under mpv's Metal view; PiP takes its frames
+                }
+                if mpv.view.superview !== host {
+                    mpv.view.frame = host.bounds
+                    mpv.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                    host.addSubview(mpv.view)
+                }
             }
             return
         }
-        mpv.view.removeFromSuperview()
+        mpv.view.removeFromSuperview(); mpvPiP.view.removeFromSuperview()
         let v: UIView = plainDrawable ? plainView : videoView
         let other: UIView = plainDrawable ? videoView : plainView
         other.removeFromSuperview()
@@ -264,6 +327,7 @@ final class PlayerModel: ObservableObject {
             selectSubtitle(want)
         }
         if s.height > 0 && s.height != videoHeight { videoHeight = s.height }
+        if pipActive || mpv.pipOutput { mpvPiP.sync(timeS: s.time, playing: isPlaying && !viewerPaused, rate: rate) }
     }
 
     private static func map(_ s: VLCMediaPlayerState) -> EngineState {
@@ -645,7 +709,14 @@ struct PlayerScreen: View {
             minimized = on
             if on { Orientation.portrait() } else { Orientation.landscape(); controls = true; scheduleHide() }
         }
-        .onAppear { start(); Orientation.landscape(); UIApplication.shared.isIdleTimerDisabled = true }
+        .onAppear {
+            model.onMPVPiPUnavailable = { msg in
+                DiagLog.shared.note("[التطبيق] صورة داخل صورة mpv غير متاحة: \(msg)")
+                show("صورة داخل صورة بـmpv ما اشتغلت (\(msg)) — أنقلك لـVLC")
+                pipViaVLC()
+            }
+            start(); Orientation.landscape(); UIApplication.shared.isIdleTimerDisabled = true
+        }
         .onDisappear {
             saveResume()
             hideTask?.cancel(); resumeTask?.cancel()
@@ -757,8 +828,8 @@ struct PlayerScreen: View {
             }
             .accessibilityLabel(model.engine == .mpv ? "المحرّك mpv — اضغط للتبديل إلى VLC" : "المحرّك VLC — اضغط للتبديل إلى mpv")
             if model.engine == .mpv {
-                // Picture in picture exists only in VLC: switch, then start it as soon as VLC plays.
-                iconButton("pip.enter") { pipViaVLC() }
+                // mpv's own picture in picture (avfoundation output); falls back to VLC if it can't start.
+                iconButton(model.pipActive ? "pip.exit" : "pip.enter") { model.togglePiP() }
             } else if model.pipReady {
                 iconButton(model.pipActive ? "pip.exit" : "pip.enter") { model.togglePiP() }
             }

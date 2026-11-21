@@ -85,7 +85,7 @@ struct LanguageSettingsSection: View {
             }
             Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP)
         } header: { Text("المشغّل") } footer: {
-            Text("mpv يعرض ألوان Dolby Vision وترجمات ASS بشكل صحيح. صورة داخل صورة تعمل مع VLC فقط: زر ⧉ في mpv ينقلك لـVLC ويفتحها، والخروج من التطبيق مع mpv يكمل الصوت فقط.")
+            Text("mpv يعرض ألوان Dolby Vision وترجمات ASS بشكل صحيح، وصار يدعم صورة داخل صورة. إذا ما اشتغلت على ملف معيّن، التطبيق ينقلك لـVLC تلقائيًا.")
         }
         Section {
             Picker("الصوت", selection: $audio) {

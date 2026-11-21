@@ -11,11 +11,28 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 100
     env:
       SHASHA_CREDIT: ${{ secrets.SHASHA_CREDIT }}
+      MPVKIT_TAG: 1.1.0-n9.0.2
     steps:
       - uses: actions/checkout@v4
+
+      # libmpv with the avfoundation video output (picture in picture), built from MPVKit's own scripts.
+      # Rebuilt only when the patches, the script or the MPVKit tag change.
+      - name: Cache patched libmpv
+        id: libmpv-cache
+        uses: actions/cache@v4
+        with:
+          path: .libmpv
+          key: libmpv-${{ env.MPVKIT_TAG }}-${{ hashFiles('patches/libmpv/**', 'scripts/build-libmpv.sh') }}
+
+      - name: Build patched libmpv
+        id: libmpv
+        if: steps.libmpv-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          scripts/build-libmpv.sh "$MPVKIT_TAG" .libmpv 2>&1 | tee libmpv.log | tail -40
 
       - name: Build
         id: build
@@ -25,6 +42,8 @@ jobs:
             echo "== xcode"; xcodebuild -version
             echo "== unit tests (PlaybackLogic)"
             swift test --package-path Logic
+            echo "== vendor MPVKit with the patched libmpv"
+            scripts/vendor-mpvkit.sh "$MPVKIT_TAG" .libmpv
             brew install xcodegen
             xcodegen generate
             pod install --repo-update
@@ -59,7 +78,8 @@ jobs:
         if: always()
         run: |
           {
-            echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }}"
+            echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }} libmpv=${{ steps.libmpv.outcome || 'cached' }}"
+            if [ -f libmpv.log ]; then echo "== libmpv (tail)"; grep -E "error|Error|FAILED|ERROR|Built " libmpv.log | tail -30; tail -15 libmpv.log; fi
             plutil -p build/Build/Products/Release-iphoneos/ShashaIOS.app/Info.plist 2>/dev/null | grep -E "CFBundle(ShortVersionString|Version)\"" || true
             cat symbols.txt 2>/dev/null || true
             echo "== size"; ls -la Shasha-unsigned.ipa 2>/dev/null || true; du -sh build/Build/Products/Release-iphoneos/ShashaIOS.app 2>/dev/null || true

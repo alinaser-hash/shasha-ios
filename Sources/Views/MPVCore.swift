@@ -1,4 +1,5 @@
 import UIKit
+import AVKit
 import Libmpv
 
 // mpv as the main player's engine (stage 2). Unlike the stage 1 hand-off controller, the main thread never
@@ -49,6 +50,12 @@ final class MPVCore {
     var state: State { lock.lock(); defer { lock.unlock() }; return st }
     private func update(_ f: (inout State) -> Void) { lock.lock(); f(&st); lock.unlock() }
 
+    /// Picture in picture output state (see setPiPOutput).
+    var pipOutput = false
+    var pipOutputReady = false
+    var pipOutputFailed = false
+    var createdLabVO: String { createdLab == .voGPU ? "gpu" : "gpu-next" }
+
     private var log: [String] = []
     func note(_ s: String) {
         lock.lock(); log.append(s); if log.count > 300 { log.removeFirst(log.count - 300) }; lock.unlock()
@@ -63,8 +70,8 @@ final class MPVCore {
     deinit { destroy() }
 
     // The Metal surface is lost in the background (fix from MPVKit's demo): drop video, keep audio.
-    @objc private func background() { if mpv != nil { setAsync("vid", "no") } }
-    @objc private func foreground() { if mpv != nil { setAsync("vid", "auto") } }
+    @objc private func background() { if mpv != nil, !pipOutput { setAsync("vid", "no") } }
+    @objc private func foreground() { if mpv != nil, !pipOutput { setAsync("vid", "auto") } }
 
     /// Creates the mpv instance once (options can only be set before mpv_initialize).
     private func create(lab: MPVLab) -> Bool {
@@ -89,6 +96,7 @@ final class MPVCore {
         opt("sub-scale", String(format: "%.2f", MPVSubScale.value))
         if let dir = MPVFonts.directory() { opt("sub-fonts-dir", dir); opt("sub-font", "Noto Sans Arabic") }
         opt("network-timeout", "20")
+        opt("avfoundation-composite-osd", "yes")   // subtitles drawn into the frames in picture in picture
         // No automatic reconnect loop of our own; FFmpeg's own short reconnect inside one request is left as is.
         let r = mpv_initialize(h)
         if r < 0 { note("API initialize: \(String(cString: mpv_error_string(r)))"); mpv_terminate_destroy(h); mpv = nil; return false }
@@ -104,7 +112,7 @@ final class MPVCore {
         }, Unmanaged.passUnretained(self).toOpaque())
         return true
     }
-    private var createdLab: MPVLab?
+    private(set) var createdLab: MPVLab?
 
     /// Opens a stream. `alang`/`slang` are mpv language lists ("ara,ar,arabic").
     func open(_ url: URL, start: Double, live: Bool, alang: String, slang: String, lab: MPVLab) {
@@ -248,7 +256,12 @@ final class MPVCore {
                 case MPV_EVENT_LOG_MESSAGE:
                     if let m = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(e.pointee.data))?.pointee,
                        let p = m.prefix, let l = m.level, let t = m.text {
-                        self.note("[\(String(cString: l))] \(String(cString: p)): \(String(cString: t).trimmingCharacters(in: .newlines))")
+                        let line = "[\(String(cString: l))] \(String(cString: p)): \(String(cString: t).trimmingCharacters(in: .newlines))"
+                        self.note(line)
+                        if self.pipOutput {
+                            if line.contains("VO: [avfoundation]") { self.pipOutputReady = true }
+                            if line.contains("[error]") && (line.contains("avfoundation") || line.contains("vo/")) { self.pipOutputFailed = true }
+                        }
                     }
                 case MPV_EVENT_START_FILE: self.note("[مرحلة] بدء الملف")
                 case MPV_EVENT_FILE_LOADED: self.note("[مرحلة] الملف محمّل"); self.update { $0.loaded = true; $0.endError = nil }
@@ -274,5 +287,104 @@ final class MPVCore {
                 }
             }
         }
+    }
+}
+
+// MARK: - Picture in picture for mpv (0.9.3)
+//
+// Normal playback stays on gpu-next (libplacebo: Dolby Vision, HDR, libass). Picture in picture needs an
+// AVSampleBufferDisplayLayer, so for the floating window only, mpv's video output is switched at runtime to
+// "avfoundation" (our patched libmpv, see patches/libmpv) drawing into that layer, then switched back.
+
+
+/// View whose layer is the AVSampleBufferDisplayLayer mpv draws into during picture in picture.
+final class MPVPiPView: UIView {
+    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+    var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+}
+
+extension MPVCore {
+    /// Switches mpv's video output: avfoundation into `pipLayer`, or back to the normal Metal output.
+    func setPiPOutput(_ on: Bool, pipLayer: AVSampleBufferDisplayLayer) {
+        guard mpv != nil else { return }
+        pipOutput = on
+        pipOutputReady = false; pipOutputFailed = false
+        if on {
+            let ptr = Int(bitPattern: Unmanaged.passUnretained(pipLayer).toOpaque())
+            note("[مرحلة] صورة داخل صورة: تحويل المخرج إلى avfoundation")
+            setAsync("wid", String(ptr))
+            setAsync("vo", "avfoundation")
+        } else {
+            let ptr = Int(bitPattern: Unmanaged.passUnretained(view.metal).toOpaque())
+            note("[مرحلة] صورة داخل صورة: رجوع المخرج إلى \(createdLabVO)")
+            setAsync("wid", String(ptr))
+            setAsync("vo", createdLabVO)
+        }
+    }
+}
+
+/// AVPictureInPictureController for mpv's sample-buffer layer, with the playback state iOS asks for.
+final class MPVPiP: NSObject, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
+    let view = MPVPiPView()
+    private(set) var controller: AVPictureInPictureController?
+    private var timebase: CMTimebase?
+
+    var isPaused: () -> Bool = { false }
+    var setPlaying: (Bool) -> Void = { _ in }
+    var skip: (Double) -> Void = { _ in }
+    var duration: () -> Double = { 0 }
+    var isLive: () -> Bool = { false }
+    var onActive: (Bool) -> Void = { _ in }
+    var onFailed: (String) -> Void = { _ in }
+
+    override init() {
+        super.init()
+        view.backgroundColor = .black
+        view.displayLayer.videoGravity = .resizeAspect
+        var tb: CMTimebase?
+        CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &tb)
+        if let tb {
+            CMTimebaseSetTime(tb, time: .zero)
+            CMTimebaseSetRate(tb, rate: 1)
+            view.displayLayer.controlTimebase = tb
+            timebase = tb
+        }
+        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        let c = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: view.displayLayer, playbackDelegate: self))
+        c.delegate = self
+        controller = c
+    }
+
+    /// Keeps the layer's clock on the playback position (PiP shows its progress from it). Small drift is left alone.
+    func sync(timeS: Double, playing: Bool, rate: Float) {
+        guard let tb = timebase else { return }
+        let now = CMTimebaseGetTime(tb).seconds
+        if !now.isFinite || abs(now - timeS) > 0.75 { CMTimebaseSetTime(tb, time: CMTime(seconds: timeS, preferredTimescale: 600)) }
+        CMTimebaseSetRate(tb, rate: playing ? Float64(rate) : 0)
+        controller?.invalidatePlaybackState()
+    }
+
+    // MARK: AVPictureInPictureSampleBufferPlaybackDelegate
+    func pictureInPictureController(_ c: AVPictureInPictureController, setPlaying playing: Bool) { setPlaying(playing) }
+    func pictureInPictureControllerTimeRangeForPlayback(_ c: AVPictureInPictureController) -> CMTimeRange {
+        if isLive() { return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity) }
+        let d = duration()
+        return d > 0 ? CMTimeRange(start: .zero, duration: CMTime(seconds: d, preferredTimescale: 600))
+                     : CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+    }
+    func pictureInPictureControllerIsPlaybackPaused(_ c: AVPictureInPictureController) -> Bool { isPaused() }
+    func pictureInPictureController(_ c: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
+    func pictureInPictureController(_ c: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {
+        skip(skipInterval.seconds); completionHandler()
+    }
+
+    // MARK: AVPictureInPictureControllerDelegate
+    func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) { onActive(true) }
+    func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) { onActive(false) }
+    func pictureInPictureController(_ c: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        onFailed(error.localizedDescription)
+    }
+    func pictureInPictureController(_ c: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        completionHandler(true)
     }
 }

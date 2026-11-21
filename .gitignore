@@ -6,3 +6,5 @@ Payload/
 *.ipa
 .DS_Store
 Logic/.build/
+vendor/
+.libmpv/
