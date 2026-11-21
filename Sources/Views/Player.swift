@@ -224,7 +224,7 @@ final class PlayerModel: ObservableObject {
     @discardableResult func selectAudio(_ id: String) -> Bool { select(id, in: player.audioTracks, kind: "صوت") }
     @discardableResult func selectSubtitle(_ id: String) -> Bool { select(id, in: player.textTracks, kind: "ترجمة") }
 
-    private func select(_ id: String, in list: [VLCMediaPlayerTrack], kind: String) -> Bool {
+    private func select(_ id: String, in list: [VLCMediaPlayer.Track], kind: String) -> Bool {
         guard let t = list.first(where: { $0.trackId == id }) else {
             lastPick = "\(kind): المسار \(id) غير موجود في قائمة المحرّك الحالية"
             return false
@@ -242,7 +242,7 @@ final class PlayerModel: ObservableObject {
     func subtitlesOff() { player.deselectAllTextTracks(); lastPick = "ترجمة: إيقاف كل المسارات" }
 
     /// Everything VLC exposes about one track; "غير متاح" where it exposes nothing.
-    static func describe(_ t: VLCMediaPlayerTrack) -> String {
+    static func describe(_ t: VLCMediaPlayer.Track) -> String {
         var p = ["id=\(t.trackId)", "«\(t.trackName)»", "محدد=\(t.isSelected ? "نعم" : "لا")",
                  "ترميز=\(t.codecName())", "fourcc=\(DiagRule.fourcc(t.fourcc))", "codec=\(DiagRule.fourcc(t.codec))",
                  "لغة=\(t.language ?? "غير متاح")"]
