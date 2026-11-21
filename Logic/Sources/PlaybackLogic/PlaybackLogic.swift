@@ -19,6 +19,9 @@ enum EngineState: Equatable {
 /// Live streams: VLC's clock also advances for live, so the same rule applies.
 struct StallDetector {
     var stallTicks = 3
+    static let tickMs: Int32 = 500
+    /// How long the clock has not moved.
+    var frozenMs: Int32 { Int32(frozenTicks) * Self.tickMs }
     private(set) var lastTime: Int32? = nil
     private(set) var frozenTicks = 0
 
@@ -58,6 +61,24 @@ enum EndRule {
         guard lengthMs > 0, timeMs > 0 else { return false }
         let left = lengthMs - min(timeMs, lengthMs)
         return Double(timeMs) / Double(lengthMs) >= watchedFraction || left <= maxTailMs
+    }
+
+    /// Clock frozen this long inside the completion zone = the file is over (some providers keep the
+    /// connection open after the last byte, so the engine never says "ended").
+    static let tailFreezeMs: Int32 = 4_000
+
+    /// Whether the item has stopped playing by itself, so an end decision must be made now.
+    /// - `ended` or `stopped`: the engine stopped on its own (the player's own stop ends the session first,
+    ///   so this is never called for it). VLCKit sometimes reports `stopped` instead of `ended` at the end.
+    /// - playing/buffering with a frozen clock only counts inside the completion zone; a freeze earlier in
+    ///   the file is a stall (spinner), never an end.
+    static func engineStopped(state: EngineState, viewerPaused: Bool, frozenMs: Int32, timeMs: Int32, lengthMs: Int32) -> Bool {
+        switch state {
+        case .ended, .stopped: return true
+        case .playing, .buffering:
+            return !viewerPaused && frozenMs >= tailFreezeMs && isComplete(timeMs: timeMs, lengthMs: lengthMs)
+        case .opening, .paused, .error: return false
+        }
     }
 
     /// Decision when the engine reports `ended`. `lastTimeMs` = last clock seen while playing

@@ -81,6 +81,40 @@ final class EndRuleTests: XCTestCase {
     }
 }
 
+final class EngineStoppedTests: XCTestCase {
+    let len: Int32 = 2_700_000
+
+    func testStoppedOrEndedAlwaysNeedsDecision() {
+        XCTAssertTrue(EndRule.engineStopped(state: .stopped, viewerPaused: false, frozenMs: 0, timeMs: len - 1_000, lengthMs: len))
+        XCTAssertTrue(EndRule.engineStopped(state: .ended, viewerPaused: false, frozenMs: 0, timeMs: 0, lengthMs: len))
+        // …and an early stop is then judged "stopped early", not finished.
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: 600_000, lengthMs: len), .stoppedEarly)
+    }
+
+    func testFrozenAtTheEndCountsAfterFourSeconds() {
+        // Owner's case: clock stuck at 00:01 left, black picture, engine still "playing".
+        XCTAssertFalse(EndRule.engineStopped(state: .playing, viewerPaused: false, frozenMs: 3_500, timeMs: len - 1_000, lengthMs: len))
+        XCTAssertTrue(EndRule.engineStopped(state: .buffering, viewerPaused: false, frozenMs: 4_000, timeMs: len - 1_000, lengthMs: len))
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: len - 1_000, lengthMs: len), .finished)
+    }
+
+    func testFreezeBeforeTheEndIsOnlyAStall() {
+        XCTAssertFalse(EndRule.engineStopped(state: .buffering, viewerPaused: false, frozenMs: 60_000, timeMs: len - 5 * 60_000, lengthMs: len))
+        XCTAssertFalse(EndRule.engineStopped(state: .buffering, viewerPaused: false, frozenMs: 60_000, timeMs: 30_000, lengthMs: 0))
+    }
+
+    func testViewerPauseOrEnginePauseNeverEnds() {
+        XCTAssertFalse(EndRule.engineStopped(state: .playing, viewerPaused: true, frozenMs: 60_000, timeMs: len - 1_000, lengthMs: len))
+        XCTAssertFalse(EndRule.engineStopped(state: .paused, viewerPaused: false, frozenMs: 60_000, timeMs: len - 1_000, lengthMs: len))
+    }
+
+    func testFrozenMsFromDetector() {
+        var d = StallDetector()
+        for _ in 0..<9 { _ = d.sample(timeMs: 1000, state: .playing, viewerPaused: false) }
+        XCTAssertEqual(d.frozenMs, 4_000)
+    }
+}
+
 final class NextCardRuleTests: XCTestCase {
     let len: Int32 = 2_700_000
 

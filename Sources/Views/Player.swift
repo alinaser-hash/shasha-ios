@@ -52,12 +52,14 @@ final class PlayerModel: ObservableObject {
     private var timer: Timer?
     private var live = false
     private var stall = StallDetector()
+    /// The item really played in this session (VLC can read "stopped" for a moment right after opening).
+    private var hasPlayed = false
 
     func open(_ url: String, startSeconds: Double = 0, live: Bool = false, session: Int) {
         engineSessionId = session
         guard let u = URL(string: url) else { failed = true; return }
         self.live = live
-        failed = false; endDecision = nil; viewerPaused = false
+        failed = false; endDecision = nil; viewerPaused = false; hasPlayed = false
         subDelay = 0; stall.reset(); buffering = true; timeMs = 0; lengthMs = 0
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
         let m = VLCMedia(url: u)
@@ -78,10 +80,14 @@ final class PlayerModel: ObservableObject {
         timeMs = t
         if len > 0 { lengthMs = len }
         playing = player.isPlaying
-        if st == .playing || st == .buffering, t > 0 { lastPlayingMs = t }
+        if st == .playing || st == .buffering, t > 0 { lastPlayingMs = t; hasPlayed = true }
         if st == .error || (live && st == .ended) { failed = true }
-        if !live, st == .ended, endDecision == nil { endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs) }
-        buffering = !failed && endDecision == nil && stall.sample(timeMs: t, state: st, viewerPaused: viewerPaused)
+        let stalled = stall.sample(timeMs: t, state: st, viewerPaused: viewerPaused)
+        if !live, endDecision == nil, hasPlayed,
+           EndRule.engineStopped(state: st, viewerPaused: viewerPaused, frozenMs: stall.frozenMs, timeMs: lastPlayingMs, lengthMs: lengthMs) {
+            endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs)
+        }
+        buffering = !failed && endDecision == nil && stalled
         let h = Int(player.videoSize.height)
         if h > 0 && h != videoHeight { videoHeight = h }
     }
