@@ -351,11 +351,27 @@ final class MPVPiP: NSObject, AVPictureInPictureControllerDelegate, AVPictureInP
             view.displayLayer.controlTimebase = tb
             timebase = tb
         }
+        rebuild()
+    }
+
+    /// A fresh controller for the same layer (0.9.6: after one PiP session iOS refused the next start on the old one).
+    func rebuild() {
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        controller?.delegate = nil
         let c = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: view.displayLayer, playbackDelegate: self))
         c.delegate = self
         controller = c
     }
+
+    /// Clears a layer iOS left failed/interrupted after the last PiP session, so new frames are shown again.
+    func resetLayer() {
+        let l = view.displayLayer
+        if l.status == .failed || l.requiresFlushToResumeDecoding { l.flush() }
+        l.flushAndRemoveImage()
+    }
+
+    /// The layer is really showing frames (not just "output ready").
+    var layerRendering: Bool { view.displayLayer.status == .rendering }
 
     /// Keeps the layer's clock on the playback position (PiP shows its progress from it). Small drift is left alone.
     func sync(timeS: Double, playing: Bool, rate: Float) {

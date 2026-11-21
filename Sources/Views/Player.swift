@@ -48,6 +48,7 @@ final class PlayerModel: ObservableObject {
     /// Called when mpv's picture in picture can't be used (old libmpv or iOS refused): the screen falls back to VLC.
     var onMPVPiPUnavailable: ((String) -> Void)?
     private var pipAttempt = 0
+    private var pipRetry = 0
 
     /// Changes the engine; the caller reopens the item at the same point.
     func use(_ e: Engine) {
@@ -75,11 +76,22 @@ final class PlayerModel: ObservableObject {
             guard let self else { return }
             DiagLog.shared.note("[التطبيق] صورة داخل صورة (mpv): \(on ? "بدأت" : "انتهت")")
             self.pipActive = on
-            if !on { self.mpv.setPiPOutput(false, pipLayer: self.mpvPiP.view.displayLayer) }
+            if !on {
+                self.mpv.setPiPOutput(false, pipLayer: self.mpvPiP.view.displayLayer)
+                self.mpvPiP.rebuild()
+            }
         }
         mpvPiP.onFailed = { [weak self] msg in
             guard let self else { return }
-            self.mpv.note("[مرحلة] صورة داخل صورة رفضها النظام: \(msg)")
+            self.mpv.note("[مرحلة] صورة داخل صورة رفضها النظام: \(msg) | الطبقة: \(self.mpvPiP.view.displayLayer.status.rawValue) | محاولة \(self.pipRetry + 1)")
+            // One retry with a fresh controller and a cleared layer before falling back to VLC.
+            if self.pipRetry == 0 {
+                self.pipRetry = 1
+                self.mpvPiP.rebuild(); self.mpvPiP.resetLayer()
+                self.pipStartPoll()
+                return
+            }
+            self.pipRetry = 0
             self.mpv.setPiPOutput(false, pipLayer: self.mpvPiP.view.displayLayer)
             self.onMPVPiPUnavailable?(msg)
         }
@@ -122,9 +134,17 @@ final class PlayerModel: ObservableObject {
     }
     /// mpv picture in picture: switch the output to the sample-buffer layer, wait for its first frames, then start.
     func startMPVPiP() {
-        guard let c = mpvPiP.controller else { onMPVPiPUnavailable?("الجهاز لا يدعم صورة داخل صورة"); return }
+        guard mpvPiP.controller != nil else { onMPVPiPUnavailable?("الجهاز لا يدعم صورة داخل صورة"); return }
+        pipRetry = 0
+        mpvPiP.resetLayer()
         mpvPiP.sync(timeS: Double(timeMs) / 1000, playing: !viewerPaused, rate: rate)
         mpv.setPiPOutput(true, pipLayer: mpvPiP.view.displayLayer)
+        pipStartPoll()
+    }
+
+    /// Waits until mpv's avfoundation output is up AND the layer is showing frames, then starts the window.
+    private func pipStartPoll() {
+        guard let c = mpvPiP.controller else { return }
         pipAttempt += 1
         let attempt = pipAttempt
         func poll(_ n: Int) {
@@ -134,14 +154,14 @@ final class PlayerModel: ObservableObject {
                 onMPVPiPUnavailable?("مخرج avfoundation غير متاح في mpv")
                 return
             }
-            if mpv.pipOutputReady && c.isPictureInPicturePossible {
+            if mpv.pipOutputReady && mpvPiP.layerRendering && c.isPictureInPicturePossible {
                 mpv.note("[مرحلة] صورة داخل صورة: بدء النافذة")
                 c.startPictureInPicture()
                 return
             }
             if n >= 40 {
                 mpv.setPiPOutput(false, pipLayer: mpvPiP.view.displayLayer)
-                onMPVPiPUnavailable?("لم تجهز صورة داخل صورة خلال 4 ثوانٍ (المخرج: \(mpv.pipOutputReady ? "جاهز" : "غير جاهز")، النظام: \(c.isPictureInPicturePossible ? "يسمح" : "لا يسمح"))")
+                onMPVPiPUnavailable?("لم تجهز صورة داخل صورة خلال 4 ثوانٍ (المخرج: \(mpv.pipOutputReady ? "جاهز" : "غير جاهز")، الطبقة: \(mpvPiP.layerRendering ? "تعرض" : "لا تعرض")، النظام: \(c.isPictureInPicturePossible ? "يسمح" : "لا يسمح"))")
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { poll(n + 1) }
