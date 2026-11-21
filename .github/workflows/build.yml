@@ -55,6 +55,7 @@ jobs:
           {
             echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }}"
             plutil -p build/Build/Products/Release-iphoneos/ShashaIOS.app/Info.plist 2>/dev/null | grep -E "CFBundle(ShortVersionString|Version)\"" || true
+            echo "== size"; ls -la Shasha-unsigned.ipa 2>/dev/null || true; du -sh build/Build/Products/Release-iphoneos/ShashaIOS.app 2>/dev/null || true
             echo "== errors"; grep -E "error:|fatal error|Undefined symbol|ld: |\*\* BUILD|\[!\]|failed \(|Executed [0-9]+ test" all.log | head -200 || true
             echo "== tail"; tail -60 all.log || true
           } > ci-summary.txt
