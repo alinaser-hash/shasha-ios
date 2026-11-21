@@ -1,0 +1,59 @@
+diff --git a/video/out/vo_avfoundation.m b/video/out/vo_avfoundation.m
+index 8155d7a..b05d943 100644
+--- a/video/out/vo_avfoundation.m
++++ b/video/out/vo_avfoundation.m
+@@ -47,6 +47,20 @@
+ #import <AppKit/AppKit.h>
+ #endif
+ 
++// CVImageBufferGetColorSpace is macOS-only in the iOS SDK: build the colour space from the buffer's
++// attachments instead (autoreleased, so callers can treat it like the "Get" function).
++static CGColorSpaceRef shasha_buffer_colorspace(CVImageBufferRef buf)
++{
++    CFDictionaryRef att = CVBufferCopyAttachments(buf, kCVAttachmentMode_ShouldPropagate);
++    if (!att)
++        return NULL;
++    CGColorSpaceRef cs = CVImageBufferCreateColorSpaceFromAttachments(att);
++    CFRelease(att);
++    if (cs)
++        CFAutorelease(cs);
++    return cs;
++}
++
+ struct priv {
+     struct mp_hwdec_ctx hwctx;
+ 
+@@ -694,7 +708,7 @@ static CVPixelBufferRef composite_frame(struct vo *vo, CVPixelBufferRef videoBuf
+     // Use autoreleasepool to ensure CIImage objects are released promptly
+     @autoreleasepool {
+         // Create CIImages - preserve color space from source for HDR
+-        CGColorSpaceRef srcColorSpace = CVImageBufferGetColorSpace(videoBuffer);
++        CGColorSpaceRef srcColorSpace = shasha_buffer_colorspace(videoBuffer);
+         CGColorSpaceRef fallbackColorSpace = NULL;
+         if (!srcColorSpace) {
+             fallbackColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+@@ -761,7 +775,7 @@ static CVPixelBufferRef composite_frame(struct vo *vo, CVPixelBufferRef videoBuf
+         // (debug indicator removed)
+         
+         // Render to output buffer, preserving color space
+-        CGColorSpaceRef outputColorSpace = CVImageBufferGetColorSpace(videoBuffer);
++        CGColorSpaceRef outputColorSpace = shasha_buffer_colorspace(videoBuffer);
+         if (outputColorSpace) {
+             [p->ciContext render:composited 
+                  toCVPixelBuffer:outputBuffer 
+@@ -974,13 +988,13 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+                     copy_hdr_metadata(pixbuf, convertedBuffer);
+ 
+                     @autoreleasepool {
+-                        CGColorSpaceRef srcColorSpace = CVImageBufferGetColorSpace(pixbuf);
++                        CGColorSpaceRef srcColorSpace = shasha_buffer_colorspace(pixbuf);
+                         CIImage *videoImage = srcColorSpace ?
+                             [CIImage imageWithCVPixelBuffer:pixbuf options:@{kCIImageColorSpace: (__bridge id)srcColorSpace}] :
+                             [CIImage imageWithCVPixelBuffer:pixbuf];
+ 
+                         if (videoImage) {
+-                            CGColorSpaceRef outputColorSpace = CVImageBufferGetColorSpace(pixbuf);
++                            CGColorSpaceRef outputColorSpace = shasha_buffer_colorspace(pixbuf);
+                             if (outputColorSpace) {
+                                 [p->ciContext render:videoImage
+                                      toCVPixelBuffer:convertedBuffer
