@@ -621,7 +621,7 @@ struct PlayerScreen: View {
     private func resumeChip(_ seconds: Double) -> some View {
         HStack(spacing: 10) {
             Text("استكمال من \(fmt(Int32(seconds * 1000)))").font(.callout)
-            Button("من البداية") { model.seek(toMs: 0); resumeAt = nil }.buttonStyle(.borderedProminent).controlSize(.small)
+            Button("من البداية") { restartFromBeginning() }.buttonStyle(.borderedProminent).controlSize(.small)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(.black.opacity(0.7), in: Capsule()).foregroundStyle(.white)
@@ -934,6 +934,17 @@ struct PlayerScreen: View {
         UserDefaults.standard.set(!PlayerPrefs.softwareDecoding, forKey: PlayerPrefs.softwareKey)
         if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
         show(PlayerPrefs.softwareDecoding ? "فك ترميز برمجي" : "فك ترميز عتادي")
+    }
+
+    /// "From the start": reopen without the start-time option. A seek to 0 right after opening is ignored by VLC
+    /// (the stream is still opening at the resume point), so the video stayed where it had stopped.
+    private func restartFromBeginning() {
+        resumeAt = nil
+        resumeTask?.cancel()
+        guard let v = current else { return }
+        openVod(v, from: 0)
+        show("من البداية")
+        scheduleHide()
     }
 
     private func retryFrom(_ at: Int32) {
