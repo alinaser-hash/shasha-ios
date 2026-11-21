@@ -75,12 +75,14 @@ struct LanguageSettingsSection: View {
     @AppStorage(PlayerPrefs.audioKey) private var audio = ""
     @AppStorage(PlayerPrefs.subsKey) private var subs = ""
     @AppStorage(PlayerPrefs.autoPiPKey) private var autoPiP = true
+    @AppStorage(PlayerPrefs.softwareKey) private var software = false
 
     var body: some View {
         Section {
             Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP)
+            Toggle("فك ترميز برمجي (لإصلاح الألوان)", isOn: $software)
         } header: { Text("المشغّل") } footer: {
-            Text("إذا خرجت من التطبيق والفيديو شغّال، يكمل في نافذة صغيرة فوق التطبيقات. تقدر تشغّلها يدويًا من زر ⧉ في المشغّل.")
+            Text("صورة داخل صورة: إذا خرجت من التطبيق والفيديو شغّال يكمل في نافذة صغيرة، أو من زر ⧉ في المشغّل.\nفك الترميز البرمجي: يصلّح الألوان الخضراء أو البنفسجية في بعض ملفات HDR / Dolby Vision، لكنه أثقل على البطارية. تقدر تجرّبه لفيديو واحد من قائمة شكل الصورة في المشغّل.")
         }
         Section {
             Picker("الصوت", selection: $audio) {
@@ -100,7 +102,9 @@ struct LanguageSettingsSection: View {
 }
 
 enum PlayerPrefs {
-    static let audioKey = "pref.audio", subsKey = "pref.subs", autoPiPKey = "pref.autopip"
+    static let audioKey = "pref.audio", subsKey = "pref.subs", autoPiPKey = "pref.autopip", softwareKey = "pref.swdecode"
+    /// Software decoding: slower and warmer, but fixes wrong colours on some HDR / Dolby Vision files.
+    static var softwareDecoding: Bool { UserDefaults.standard.bool(forKey: softwareKey) }
     /// Leaving the app while a video plays moves it to the floating window (default on).
     static var autoPiP: Bool { UserDefaults.standard.object(forKey: autoPiPKey) as? Bool ?? true }
     static let arabic = "ara,ar,arabic", english = "eng,en,english"

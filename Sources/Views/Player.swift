@@ -61,11 +61,13 @@ final class PlayerModel: ObservableObject {
         guard !pipActive, playing, let c = videoView.windowController else { return }
         c.startPictureInPicture()
     }
-    @Published var timeMs: Int32 = 0
-    @Published var lengthMs: Int32 = 0
+    /// Values that change twice a second live in `clock`, observed only by the few small views that show them.
+    /// Otherwise the whole player (and any open menu) would redraw on every tick: menus jumped under the finger.
+    let clock = PlayerClock()
+    var timeMs: Int32 { get { clock.timeMs } set { if clock.timeMs != newValue { clock.timeMs = newValue } } }
+    var lengthMs: Int32 { get { clock.lengthMs } set { if clock.lengthMs != newValue { clock.lengthMs = newValue } } }
+    var buffering: Bool { get { clock.buffering } set { if clock.buffering != newValue { clock.buffering = newValue } } }
     @Published var playing = false
-    /// Spinner = the playback clock stopped moving (see StallDetector in PlaybackLogic).
-    @Published var buffering = true
     /// Live stream stopped, or the engine reported an error.
     @Published var failed = false
     /// Set once when a film/episode reaches the engine's end: finished, or stopped before the end.
@@ -95,6 +97,11 @@ final class PlayerModel: ObservableObject {
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
         guard let m = VLCMedia(url: u) else { failed = true; return }
         m.addOption(":network-caching=1500")
+        if PlayerPrefs.softwareDecoding {
+            // Some HDR / Dolby Vision files come out green or purple with the hardware decoder.
+            m.addOption(":codec=avcodec")
+            m.addOption(":avcodec-hw=none")
+        }
         if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
         if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -112,9 +119,10 @@ final class PlayerModel: ObservableObject {
         let st = Self.map(player.state)
         timeMs = t
         if len > 0 { lengthMs = len }
-        playing = player.isPlaying
+        let isPlaying = player.isPlaying
+        if playing != isPlaying { playing = isPlaying }
         if st == .playing || st == .buffering, t > 0 { lastPlayingMs = t; hasPlayed = true }
-        if st == .error || (live && hasPlayed && st == .stopped) { failed = true }
+        if !failed, st == .error || (live && hasPlayed && st == .stopped) { failed = true }
         let stalled = stall.sample(timeMs: t, state: st, viewerPaused: viewerPaused)
         if !live, endDecision == nil, hasPlayed,
            EndRule.engineStopped(state: st, viewerPaused: viewerPaused, frozenMs: stall.frozenMs, timeMs: lastPlayingMs, lengthMs: lengthMs) {
@@ -232,6 +240,20 @@ final class PlayerModel: ObservableObject {
 }
 
 /// UIView that VLC draws into.
+final class PlayerClock: ObservableObject {
+    @Published var timeMs: Int32 = 0
+    @Published var lengthMs: Int32 = 0
+    /// Spinner = the playback clock stopped moving (see StallDetector in PlaybackLogic).
+    @Published var buffering = true
+}
+
+/// Redraws only its content when the clock ticks.
+struct ClockReader<Content: View>: View {
+    @ObservedObject var clock: PlayerClock
+    @ViewBuilder let content: () -> Content
+    var body: some View { content() }
+}
+
 struct VLCView: UIViewRepresentable {
     let model: PlayerModel
     func makeUIView(context: Context) -> UIView {
@@ -306,7 +328,9 @@ struct PlayerScreen: View {
                 VLCView(model: model).ignoresSafeArea()
                 touchLayer(geo.size).ignoresSafeArea()
 
-                if model.buffering { ProgressView().tint(.white).scaleEffect(1.5).allowsHitTesting(false) }
+                ClockReader(clock: model.clock) {
+                    if model.buffering { ProgressView().tint(.white).scaleEffect(1.5).allowsHitTesting(false) }
+                }
                 if let flash { centerBadge(flash, flashIcon) }
                 if let level { levelBar(level.icon, level.value) }
                 if let s = scrub, !isLive, model.lengthMs > 0 { centerBadge(fmt(Int32(s * Double(model.lengthMs))) + " / " + fmt(model.lengthMs), "arrow.left.and.right") }
@@ -317,7 +341,9 @@ struct PlayerScreen: View {
                     overlay(geo.size)
                 }
                 if let r = resumeAt, !locked { resumeChip(r) }
-                if let n = nextUp, nextVisible, !nextDismissed, !locked, stoppedEarlyAt == nil { nextCard(n) }
+                if let n = nextUp, nextVisible, !nextDismissed, !locked, stoppedEarlyAt == nil {
+                    ClockReader(clock: model.clock) { nextCard(n) }
+                }
                 if let notice {
                     Text(notice).font(.callout).padding(.horizontal, 14).padding(.vertical, 9)
                         .background(.black.opacity(0.75), in: Capsule()).foregroundStyle(.white)
@@ -340,11 +366,12 @@ struct PlayerScreen: View {
                 EpisodePickerSheet(queue: queue, current: index) { i in sheet = nil; playEpisode(i) }
             }
         }
-        .onReceive(model.$timeMs) { t in
+        .onReceive(model.clock.$timeMs) { t in
             guard !isLive else { return }
             model.nowPlaying(title)
-            nextVisible = NextCardRule.visible(current: nextVisible, hasNext: nextUp != nil, dismissed: nextDismissed,
-                                               timeMs: t, lengthMs: model.lengthMs, scrubbing: scrub != nil)
+            let v = NextCardRule.visible(current: nextVisible, hasNext: nextUp != nil, dismissed: nextDismissed,
+                                         timeMs: t, lengthMs: model.lengthMs, scrubbing: scrub != nil)
+            if v != nextVisible { nextVisible = v }
             if model.playing, ResumeRule.periodicDue(lastSavedAtMs: lastSavedAtMs, timeMs: t) { saveResume() }
         }
         .onReceive(model.$endDecision) { d in
@@ -496,6 +523,10 @@ struct PlayerScreen: View {
     }
 
     private var vodBottom: some View {
+        ClockReader(clock: model.clock) { vodBottomContent }
+    }
+
+    private var vodBottomContent: some View {
         VStack(spacing: 6) {
             if model.lengthMs > 0 {
                 let shown = scrub ?? Double(model.timeMs) / Double(max(model.lengthMs, 1))
@@ -650,6 +681,12 @@ struct PlayerScreen: View {
                     Button { fit = f; model.apply(f); show(f.rawValue) } label: { if fit == f { Label(f.rawValue, systemImage: "checkmark") } else { Text(f.rawValue) } }
                 }
             }
+            Section("الألوان") {
+                Button { switchDecoder() } label: {
+                    Label(PlayerPrefs.softwareDecoding ? "رجوع لفك الترميز العتادي" : "ألوان غلط؟ فك ترميز برمجي",
+                          systemImage: "paintpalette")
+                }
+            }
         } label: { menuIcon("aspectratio") }
     }
 
@@ -782,6 +819,13 @@ struct PlayerScreen: View {
             stoppedEarlyAt = at
             controls = true
         }
+    }
+
+    /// Reopens the same item at the same point with the other decoder (remembered for next time).
+    private func switchDecoder() {
+        UserDefaults.standard.set(!PlayerPrefs.softwareDecoding, forKey: PlayerPrefs.softwareKey)
+        if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
+        show(PlayerPrefs.softwareDecoding ? "فك ترميز برمجي" : "فك ترميز عتادي")
     }
 
     private func retryFrom(_ at: Int32) {
