@@ -83,6 +83,7 @@ final class MPVCore {
         opt("cache", "yes")
         opt("demuxer-max-bytes", "150MiB")
         opt("volume-max", "200")
+        opt("audio-channels", "auto")       // was auto-safe (stereo): request the file's layout; the route decides
         opt("subs-fallback", "yes")
         opt("sub-font-size", "46")
         opt("sub-scale", String(format: "%.2f", MPVSubScale.value))
@@ -190,6 +191,9 @@ final class MPVCore {
             var parts: [String] = []
             if !title.isEmpty { parts.append(title) }
             if !lang.isEmpty { parts.append("[\(lang)]") }
+            if type == "audio", let ch = t["demux-channel-count"] as? Int {
+                parts.append(ch == 6 ? "5.1" : ch == 8 ? "7.1" : ch == 2 ? "ستيريو" : ch == 1 ? "أحادي" : "\(ch) قنوات")
+            }
             var name = parts.isEmpty ? "مسار \(idn)" : parts.joined(separator: " ")
             if (t["forced"] as? Bool) == true { name += " · إجبارية" }
             if (t["external"] as? Bool) == true { name += " · خارجية" }

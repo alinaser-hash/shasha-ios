@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import VLCKit
 import MediaPlayer
+import AVFoundation
 import UniformTypeIdentifiers
 
 /// What to play: a live channel inside its list (switch channels) or a film/episode inside its queue.
@@ -1166,6 +1167,10 @@ struct PlayerScreen: View {
         l.append("colormatrix: \(p("video-params/colormatrix")) | gamma: \(p("video-params/gamma")) | primaries: \(p("video-params/primaries")) | sig-peak: \(p("video-params/sig-peak"))")
         l.append("الترجمة: sid=\(p("sid")) | \(p("current-tracks/sub/codec")) [\(p("current-tracks/sub/lang"))] | الحجم \(Int((MPVSubScale.value * 100).rounded()))٪ | التأخير \(p("sub-delay"))")
         l.append("الصوت: aid=\(p("aid")) | \(p("current-tracks/audio/codec")) [\(p("current-tracks/audio/lang"))] | السرعة \(p("speed"))")
+        let session = AVAudioSession.sharedInstance()
+        let route = session.currentRoute.outputs.map { "\($0.portName) (\($0.portType.rawValue))" }.joined(separator: "، ")
+        l.append("قنوات الملف: \(p("audio-params/channel-count")) (\(p("audio-params/hr-channels"))) → الخارج من mpv: \(p("audio-out-params/channel-count")) (\(p("audio-out-params/hr-channels")))")
+        l.append("مخرج الصوت: \(route) | أقصى قنوات يقبلها: \(session.maximumOutputNumberOfChannels) | الحالية: \(session.outputNumberOfChannels)")
         l.append("")
         l.append("— بيانات المزوّد (ffprobe عند المزوّد)")
         if let v = current, !v.probe.isEmpty { l.append(contentsOf: v.probe) } else { l.append("غير متاح — المزوّد لم يرسل بيانات الملف") }

@@ -17,6 +17,9 @@ struct ShashaApp: App {
     init() {
         // Sound even with the silent switch on, and keep audio when the screen locks.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        // 0.9.2: tell iOS the app can send multichannel audio (iOS 15+), so routes that take more than two
+        // channels (spatial audio on AirPods, AirPlay, HDMI) are offered them; mpv then asks for up to the file's channels.
+        if #available(iOS 15.0, *) { try? AVAudioSession.sharedInstance().setSupportsMultichannelContent(true) }
         try? AVAudioSession.sharedInstance().setActive(true)
         // VLC errors/warnings kept in memory for "Copy playback diagnostics".
         VLCLibrary.shared().loggers = [DiagLog.shared]
