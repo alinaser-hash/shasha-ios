@@ -34,6 +34,23 @@ struct VodPlay: Hashable {
 
 /// VLCKit player state, polled twice a second (simple and robust across VLCKit versions).
 final class PlayerModel: ObservableObject {
+    /// Stage 2: mpv is the main engine; VLC stays as the fallback (and for picture in picture, which only VLC has).
+    enum Engine: String { case mpv, vlc }
+    @Published private(set) var engine: Engine = PlayerPrefs.engine
+    let mpv = MPVCore()
+    /// mpv lab mode for the next open (one factor, this open only).
+    var mpvLab: MPVLab = .normal
+    /// Set when the viewer asks for picture in picture while on mpv: switch to VLC, then start it when VLC is ready.
+    var pipWhenReady = false
+
+    /// Changes the engine; the caller reopens the item at the same point.
+    func use(_ e: Engine) {
+        guard e != engine else { return }
+        if engine == .mpv { mpv.stopPlayback() } else { player.stop() }
+        engine = e
+        DiagLog.shared.note("[التطبيق] تبديل المحرّك إلى \(e == .mpv ? "mpv" : "VLC")")
+    }
+
     let player = VLCMediaPlayer()
     /// The view VLC draws into; also the picture-in-picture source (VLCKit 4).
     let videoView = ShashaPiPView()
@@ -72,7 +89,7 @@ final class PlayerModel: ObservableObject {
     }
 
     func startPiPIfPossible() {
-        guard !pipActive, playing, let c = videoView.windowController else { return }
+        guard engine == .vlc, !pipActive, playing, let c = videoView.windowController else { return }
         c.startPictureInPicture()
     }
     /// Values that change twice a second live in `clock`, observed only by the few small views that show them.
@@ -112,6 +129,16 @@ final class PlayerModel: ObservableObject {
 
     /// Puts the chosen drawable in the host and hands it to VLC. Called before each open.
     func attachDrawable() {
+        if engine == .mpv {
+            videoView.removeFromSuperview(); plainView.removeFromSuperview()
+            if let host = hostView, mpv.view.superview !== host {
+                mpv.view.frame = host.bounds
+                mpv.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                host.addSubview(mpv.view)
+            }
+            return
+        }
+        mpv.view.removeFromSuperview()
         let v: UIView = plainDrawable ? plainView : videoView
         let other: UIView = plainDrawable ? videoView : plainView
         other.removeFromSuperview()
@@ -137,6 +164,16 @@ final class PlayerModel: ObservableObject {
         failed = false; endDecision = nil; viewerPaused = false; hasPlayed = false
         subDelay = 0; stall.reset(); buffering = true; timeMs = 0; lengthMs = 0
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
+        if engine == .mpv {
+            attachDrawable()
+            let lab = mpvLab; mpvLab = .normal
+            DiagLog.shared.note(String(format: "[فتح] mpv | %@ | بداية من %.0f ث | وضع: %@", u.isFileURL ? "ملف محلي" : "HTTP", startSeconds, lab.rawValue))
+            mpv.open(u, start: startSeconds, live: live, alang: PlayerPrefs.audio, slang: PlayerPrefs.subs, lab: lab)
+            if rate != 1 { mpv.setAsync("speed", String(format: "%.2f", rate)) }
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
+            return
+        }
         guard let m = VLCMedia(url: u) else { failed = true; return }
         m.addOption(":network-caching=1500")
         // Decoder priority list. VLC tries the modules in order for every stream and skips those that cannot decode it,
@@ -168,6 +205,11 @@ final class PlayerModel: ObservableObject {
     }
 
     private func tick() {
+        if engine == .mpv { tickMPV(); return }
+        if pipWhenReady, player.isPlaying, let c = videoView.windowController, pipReady {
+            pipWhenReady = false
+            c.startPictureInPicture()
+        }
         // Written so it compiles whether VLCKit imports these as optional or not.
         let t = (player.time as VLCTime?)?.intValue ?? 0
         let len = ((player.media as VLCMedia?)?.length as VLCTime?)?.intValue ?? 0
@@ -193,6 +235,36 @@ final class PlayerModel: ObservableObject {
         if h > 0 && h != videoHeight { videoHeight = h }
     }
 
+    /// Same rules as VLC (StallDetector, EndRule), fed from mpv's cached properties.
+    private func tickMPV() {
+        let s = mpv.state
+        let t = Int32(max(0, s.time) * 1000)
+        if s.loaded { timeMs = t }
+        if s.duration > 0 { lengthMs = Int32(s.duration * 1000) }
+        let st: EngineState
+        if s.endError != nil { st = .error }
+        else if s.eof { st = .ended }
+        else if !s.loaded { st = .opening }
+        else if s.pausedForCache || s.seeking { st = .buffering }
+        else if s.paused { st = .paused }
+        else { st = .playing }
+        let isPlaying = st == .playing || st == .buffering
+        if playing != isPlaying { playing = isPlaying }
+        if (st == .playing || st == .buffering), t > 0 { lastPlayingMs = t; hasPlayed = true }
+        if !failed, st == .error || (live && hasPlayed && st == .ended) { failed = true }
+        let stalled = stall.sample(timeMs: t, state: st, viewerPaused: viewerPaused)
+        if !live, endDecision == nil, hasPlayed,
+           EndRule.engineStopped(state: st, viewerPaused: viewerPaused, frozenMs: stall.frozenMs, timeMs: lastPlayingMs, lengthMs: lengthMs) {
+            endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs)
+        }
+        buffering = !failed && endDecision == nil && (stalled || st == .opening)
+        if let want = pendingSubtitleId, mpv.tracks.contains(where: { $0.type == "sub" && $0.id == want }) {
+            pendingSubtitleId = nil
+            selectSubtitle(want)
+        }
+        if s.height > 0 && s.height != videoHeight { videoHeight = s.height }
+    }
+
     private static func map(_ s: VLCMediaPlayerState) -> EngineState {
         switch s {
         case .opening: return .opening
@@ -215,12 +287,20 @@ final class PlayerModel: ObservableObject {
         }
     }
 
-    func setRate(_ r: Float) { player.rate = r; rate = r }
+    func setRate(_ r: Float) {
+        if engine == .mpv { mpv.setAsync("speed", String(format: "%.2f", r)) } else { player.rate = r }
+        rate = r
+    }
 
     enum Fit: String, CaseIterable { case fit = "ملاءمة", fill = "ملء الشاشة", wide = "16:9", classic = "4:3" }
 
     /// Picture shape. VLC copies the strings it is given.
     func apply(_ f: Fit) {
+        if engine == .mpv {
+            mpv.setAsync("panscan", f == .fill ? "1.0" : "0.0")
+            mpv.setAsync("video-aspect-override", f == .wide ? "16:9" : f == .classic ? "4:3" : "no")
+            return
+        }
         player.videoAspectRatio = nil
         player.setCropRatioWithNumerator(0, denominator: 0)
         switch f {
@@ -236,7 +316,8 @@ final class PlayerModel: ObservableObject {
     /// The only way to play/pause: on-screen buttons and Control Center both come here.
     func command(_ c: PauseCommand) {
         viewerPaused = PauseRule.apply(c, viewerPaused: viewerPaused)
-        if viewerPaused { player.pause() } else { player.play() }
+        if engine == .mpv { mpv.setAsync("pause", viewerPaused ? "yes" : "no") }
+        else if viewerPaused { player.pause() } else { player.play() }
         playing = !viewerPaused
         stall.reset()
         videoView.windowController?.invalidatePlaybackState()
@@ -244,39 +325,81 @@ final class PlayerModel: ObservableObject {
     func jump(_ seconds: Int32) { seek(toMs: Int32(max(0, Int(timeMs) + Int(seconds) * 1000))) }
     func seek(toMs ms: Int32) {
         let target = lengthMs > 0 ? min(ms, lengthMs - 1000) : ms
-        player.time = VLCTime(int: max(0, target))
+        if engine == .mpv { mpv.commandAsync(["seek", String(format: "%.2f", Double(max(0, target)) / 1000), "absolute"]) }
+        else { player.time = VLCTime(int: max(0, target)) }
         timeMs = max(0, target); stall.reset()
         videoView.windowController?.invalidatePlaybackState()
     }
 
     /// App volume 0…200 (100 = normal).
+    private var mpvVolume: Int32 = 100
     var volume: Int32 {
-        get { (player.audio as VLCAudio?)?.volume ?? 100 }
-        set { if let a = player.audio as VLCAudio? { a.volume = max(0, min(200, newValue)) } }
+        get { engine == .mpv ? mpvVolume : ((player.audio as VLCAudio?)?.volume ?? 100) }
+        set {
+            let v = max(0, min(200, newValue))
+            if engine == .mpv { mpvVolume = v; mpv.setAsync("volume", String(v)) }
+            else if let a = player.audio as VLCAudio? { a.volume = v }
+        }
     }
 
-    func stop() { timer?.invalidate(); timer = nil; engineSessionId = nil; player.stop(); clearRemote() }
+    func stop() {
+        timer?.invalidate(); timer = nil; engineSessionId = nil
+        if engine == .mpv { mpv.stopPlayback() } else { player.stop() }
+        clearRemote()
+    }
 
     /// Subtitle delay in seconds (VLC stores microseconds). Positive = later.
     func shiftSubs(_ d: Double) {
         subDelay = d == 0 ? 0 : (subDelay + d)
-        player.currentVideoSubTitleDelay = Int(subDelay * 1_000_000)
+        if engine == .mpv { mpv.setAsync("sub-delay", String(format: "%.2f", subDelay)) }
+        else { player.currentVideoSubTitleDelay = Int(subDelay * 1_000_000) }
     }
 
     /// Adds a downloaded subtitle file and switches to it.
-    func addSubtitle(_ file: URL) { player.addPlaybackSlave(file, type: .subtitle, enforce: true) }
+    func addSubtitle(_ file: URL) {
+        if engine == .mpv { mpv.commandAsync(["sub-add", file.path, "select"]) }
+        else { player.addPlaybackSlave(file, type: .subtitle, enforce: true) }
+    }
 
     /// A track as shown in the panel. `id` is VLC's own track id (not a position in an old list).
     struct Track: Identifiable { let id: String; let name: String; let selected: Bool }
-    var audioTracks: [Track] { player.audioTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) } }
-    var subtitleTracks: [Track] { player.textTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) } }
+    var audioTracks: [Track] {
+        if engine == .mpv { return mpv.tracks.filter { $0.type == "audio" }.map { Track(id: $0.id, name: $0.name, selected: $0.selected) } }
+        return player.audioTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) }
+    }
+    var subtitleTracks: [Track] {
+        if engine == .mpv { return mpv.tracks.filter { $0.type == "sub" }.map { Track(id: $0.id, name: $0.name, selected: $0.selected) } }
+        return player.textTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) }
+    }
 
     /// What happened on the last track pick (shown in diagnostics).
     private(set) var lastPick = "لا يوجد"
 
     /// Selects by VLC track id, looked up in the engine's current list. Returns false if that track no longer exists.
-    @discardableResult func selectAudio(_ id: String) -> Bool { select(id, in: player.audioTracks, kind: "صوت") }
-    @discardableResult func selectSubtitle(_ id: String) -> Bool { select(id, in: player.textTracks, kind: "ترجمة") }
+    @discardableResult func selectAudio(_ id: String) -> Bool {
+        if engine == .mpv { return selectMPV(id, type: "audio", property: "aid", kind: "صوت") }
+        return select(id, in: player.audioTracks, kind: "صوت")
+    }
+    @discardableResult func selectSubtitle(_ id: String) -> Bool {
+        if engine == .mpv { return selectMPV(id, type: "sub", property: "sid", kind: "ترجمة") }
+        return select(id, in: player.textTracks, kind: "ترجمة")
+    }
+
+    private func selectMPV(_ id: String, type: String, property: String, kind: String) -> Bool {
+        guard let t = mpv.tracks.first(where: { $0.type == type && $0.id == id }) else {
+            lastPick = "\(kind): المسار \(id) غير موجود في قائمة mpv الحالية"
+            return false
+        }
+        DiagLog.shared.note("[التطبيق] طلب اختيار \(kind) mpv \(id) «\(t.name)»")
+        mpv.setAsync(property, id)
+        lastPick = "\(kind): طُلب اختيار mpv \(property)=\(id) «\(t.name)»"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            let now = self.mpv.tracks.filter { $0.type == type && $0.selected }.map { "\($0.id) «\($0.name)»" }
+            self.lastPick += " → المحدد فعليًا بعد 0.6 ث: " + (now.isEmpty ? "لا شيء" : now.joined(separator: "، "))
+        }
+        return true
+    }
 
     private func select(_ id: String, in list: [VLCMediaPlayer.Track], kind: String) -> Bool {
         guard let t = list.first(where: { $0.trackId == id }) else {
@@ -294,7 +417,11 @@ final class PlayerModel: ObservableObject {
         return true
     }
 
-    func subtitlesOff() { DiagLog.shared.note("[التطبيق] إيقاف كل الترجمات"); player.deselectAllTextTracks(); lastPick = "ترجمة: إيقاف كل المسارات" }
+    func subtitlesOff() {
+        DiagLog.shared.note("[التطبيق] إيقاف كل الترجمات")
+        if engine == .mpv { mpv.setAsync("sid", "no") } else { player.deselectAllTextTracks() }
+        lastPick = "ترجمة: إيقاف كل المسارات"
+    }
 
     /// Everything VLC exposes about one track; "غير متاح" where it exposes nothing.
     static func describe(_ t: VLCMediaPlayer.Track) -> String {
@@ -621,16 +748,17 @@ struct PlayerScreen: View {
                 Text(q).font(.caption2.bold()).padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
             }
-            if !isLive, current != nil {
-                // The mpv engine, one tap away (Dolby Vision colours, embedded ASS subtitles).
-                Button { openMPV() } label: {
-                    Label("mpv", systemImage: "bolt.horizontal.circle.fill").font(.callout.bold())
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Theme.teal, in: Capsule()).foregroundStyle(.black)
-                }
-                .accessibilityLabel("تشغيل بمحرّك mpv")
+            // Engine switch, one tap away: shows the engine in use; tap = continue in the other one from the same point.
+            Button { switchEngine(model.engine == .mpv ? .vlc : .mpv) } label: {
+                Label(model.engine == .mpv ? "mpv" : "VLC", systemImage: "arrow.triangle.2.circlepath").font(.callout.bold())
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(model.engine == .mpv ? Theme.teal : Color.orange, in: Capsule()).foregroundStyle(.black)
             }
-                        if model.pipReady {
+            .accessibilityLabel(model.engine == .mpv ? "المحرّك mpv — اضغط للتبديل إلى VLC" : "المحرّك VLC — اضغط للتبديل إلى mpv")
+            if model.engine == .mpv {
+                // Picture in picture exists only in VLC: switch, then start it as soon as VLC plays.
+                iconButton("pip.enter") { pipViaVLC() }
+            } else if model.pipReady {
                 iconButton(model.pipActive ? "pip.exit" : "pip.enter") { model.togglePiP() }
             }
             iconButton("lock.open") { locked = true; controls = true; scheduleHide(); show("الشاشة مقفلة — اضغط القفل للفتح") }
@@ -844,7 +972,15 @@ struct PlayerScreen: View {
                     model.selectSubtitle(t.id); refreshTracks(.subtitles); show("الترجمة: \(t.name)")
                 }
             }
-            if !panelTracks.isEmpty {
+            if model.engine == .mpv {
+                panelHeader("حجم الترجمة \(Int((MPVSubScale.value * 100).rounded()))٪")
+                HStack(spacing: 10) {
+                    panelButton("أصغر", "textformat.size.smaller") { changeSubScale(-0.1) }
+                    panelButton("أكبر", "textformat.size.larger") { changeSubScale(0.1) }
+                }
+                .padding(.horizontal, 8).padding(.vertical, 6)
+            }
+            if model.engine == .vlc, !panelTracks.isEmpty {
                 panelHeader("الترجمة محددة ولا تظهر؟")
                 panelRow(model.plainSubtitles ? "العرض كنص بسيط: مفعّل (اضغط للرجوع)" : "جرّب عرضها كنص بسيط (بدون libass)",
                          selected: model.plainSubtitles, icon: "textformat") { togglePlainSubtitles() }
@@ -855,7 +991,6 @@ struct PlayerScreen: View {
             }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             if !isLive {
-                panelRow("فتح بمحرّك mpv (تجريبي)", icon: "bolt.horizontal.circle") { closePanel(); openMPV() }
                 panelHeader("من الإنترنت")
                 panelRow("أفضل ترجمة عربية تلقائيًا", icon: "sparkles") { closePanel(); autoArabicSubtitle() }
                 panelRow("بحث في OpenSubtitles…", icon: "globe") { closePanel(); sheet = .subs }
@@ -874,17 +1009,19 @@ struct PlayerScreen: View {
             }
             if !isLive, current != nil {
                 panelHeader("ألوان HDR / Dolby Vision")
-                panelRow("فتح بمحرّك mpv (تجريبي)", icon: "bolt.horizontal.circle") { closePanel(); openMPV() }
+                if model.engine == .vlc {
+                    panelRow("التبديل إلى mpv", icon: "arrow.triangle.2.circlepath") { closePanel(); switchEngine(.mpv) }
+                }
                 panelRow("فتح بمشغّل Apple", icon: "apple.logo") { closePanel(); openApplePlayer() }
                 panelHeader("mpv بوضع اختبار (لملف ينهار قبل ما يفتح)")
                 ForEach(MPVLab.allCases.filter { $0 != .normal }, id: \.self) { m in
                     panelRow(m.rawValue, icon: "flask") { closePanel(); openMPV(m) }
                 }
                 panelNote("كل وضع يغيّر عاملًا واحدًا فقط، وللمرة هذي بس. إذا انهار، افتح التشخيص واضغط «نسخ».")
-                panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
+                panelNote("mpv يعالج Dolby Vision (ثبت على ملك الخواتم). VLC يطلعها خضراء/بنفسجية. مشغّل Apple يعرضها صح ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
-            if let v = current, CopyRule.isDolbyVision5(v.probe) {
+            if model.engine == .vlc, let v = current, CopyRule.isDolbyVision5(v.probe) {
                 panelHeader("Dolby Vision 5")
                 panelNote("حسب بيانات المزوّد هذه النسخة Dolby Vision profile 5 بدون طبقة HDR10، ومشغّل VLC على الآيفون لا يعالجها، فتطلع الألوان خضراء/بنفسجية. اختر نسخة أخرى من صفحة المسلسل أو الفيلم (قسم «نسخ أخرى»).")
             }
@@ -909,12 +1046,14 @@ struct PlayerScreen: View {
                 DiagLog.shared.level = diagDetailed ? .debug : .warning
                 show(diagDetailed ? "فعّل الترجمة الآن ثم ارجع وانسخ" : "رجع التسجيل للأخطاء فقط")
             }
-            panelHeader("مختبر الترجمة — عامل واحد في كل مرة")
-            panelRow(model.plainDrawable ? "مخرج عادي بدون PiP: مفعّل" : "مخرج عادي بدون PiP", selected: model.plainDrawable, icon: "rectangle") {
-                labToggle { model.plainDrawable.toggle() }
-            }
-            panelRow(model.noAutoTracks ? "بدون اختيار تلقائي للمسارات: مفعّل" : "بدون اختيار تلقائي للمسارات", selected: model.noAutoTracks, icon: "hand.raised") {
-                labToggle { model.noAutoTracks.toggle() }
+            if model.engine == .vlc {
+                panelHeader("مختبر VLC — عامل واحد في كل مرة")
+                panelRow(model.plainDrawable ? "مخرج عادي بدون PiP: مفعّل" : "مخرج عادي بدون PiP", selected: model.plainDrawable, icon: "rectangle") {
+                    labToggle { model.plainDrawable.toggle() }
+                }
+                panelRow(model.noAutoTracks ? "بدون اختيار تلقائي للمسارات: مفعّل" : "بدون اختيار تلقائي للمسارات", selected: model.noAutoTracks, icon: "hand.raised") {
+                    labToggle { model.noAutoTracks.toggle() }
+                }
             }
             panelRow("من بداية الحلقة (بدون استكمال)", icon: "backward.end") { closePanel(); restartFromBeginning() }
             if let v = current, !v.url.hasPrefix("file:") {
@@ -943,6 +1082,7 @@ struct PlayerScreen: View {
 
     /// Plain-text report of what the engine and the provider actually say. Links and login data are removed.
     private func diagnostics() -> String {
+        if model.engine == .mpv { return mpvDiagnostics() }
         let info = Bundle.main.infoDictionary
         var l: [String] = []
         l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
@@ -1008,6 +1148,48 @@ struct PlayerScreen: View {
         return DiagRule.redact(l.joined(separator: "\n"), secrets: secrets)
     }
 
+    /// Diagnostics when mpv is the engine: what mpv itself reports, then its own log. Links and login data removed.
+    private func mpvDiagnostics() -> String {
+        let info = Bundle.main.infoDictionary
+        let m = model.mpv
+        func p(_ n: String) -> String { m.string(n) ?? "غير متاح" }
+        let s = m.state
+        var l: [String] = []
+        l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل (المحرّك: mpv)")
+        l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
+        l.append("المحرّك: mpv \(p("mpv-version")) | FFmpeg \(p("ffmpeg-version"))")
+        l.append("العنوان: \(title)")
+        if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
+        l.append("الحالة: محمّل=\(s.loaded) | إيقاف=\(s.paused) | تخزين=\(s.pausedForCache) | نهاية=\(s.eof) | خطأ=\(s.endError ?? "لا") | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
+        l.append("مخرج الفيديو: \(p("current-vo")) | فك عتادي: \(p("hwdec-current"))")
+        l.append("الفيديو: \(p("video-codec")) | \(p("video-params/w"))x\(p("video-params/h")) | \(p("video-params/pixelformat"))")
+        l.append("colormatrix: \(p("video-params/colormatrix")) | gamma: \(p("video-params/gamma")) | primaries: \(p("video-params/primaries")) | sig-peak: \(p("video-params/sig-peak"))")
+        l.append("الترجمة: sid=\(p("sid")) | \(p("current-tracks/sub/codec")) [\(p("current-tracks/sub/lang"))] | الحجم \(Int((MPVSubScale.value * 100).rounded()))٪ | التأخير \(p("sub-delay"))")
+        l.append("الصوت: aid=\(p("aid")) | \(p("current-tracks/audio/codec")) [\(p("current-tracks/audio/lang"))] | السرعة \(p("speed"))")
+        l.append("")
+        l.append("— بيانات المزوّد (ffprobe عند المزوّد)")
+        if let v = current, !v.probe.isEmpty { l.append(contentsOf: v.probe) } else { l.append("غير متاح — المزوّد لم يرسل بيانات الملف") }
+        l.append("")
+        l.append("— المسارات (من mpv)")
+        m.tracks.forEach { l.append("\($0.type) id=\($0.id) | \($0.name) | محدد=\($0.selected ? "نعم" : "لا")") }
+        l.append("آخر اختيار: \(model.lastPick)")
+        l.append("")
+        l.append("— سجل mpv (الأخطاء والتحذيرات المختلفة أولًا، ثم آخر 80 سطر)")
+        let lines = m.logLines()
+        var seen = Set<String>()
+        for e in lines where e.contains("[error]") || e.contains("[warn]") || e.contains("[fatal]") || e.contains("API ") || e.contains("end-file") {
+            if seen.insert(e).inserted { l.append(e) }
+        }
+        l.append("…")
+        l.append(contentsOf: lines.suffix(80))
+        var secrets: [String] = []
+        if let x = library.xtream {
+            secrets += [x.user, x.pass]
+            if let host = URL(string: x.server)?.host { secrets.append(host) }
+        }
+        return DiagRule.redact(l.joined(separator: "\n"), secrets: secrets)
+    }
+
     private func stateName(_ s: VLCMediaPlayerState) -> String {
         switch s {
         case .opening: return "يفتح"
@@ -1064,7 +1246,35 @@ struct PlayerScreen: View {
 
     // MARK: mpv hand-off (stage 1 of the engine change)
 
+    /// Continues the current item in the other engine from the same point (same session rules as any reopen).
+    private func switchEngine(_ e: PlayerModel.Engine, lab: MPVLab = .normal) {
+        let at = Double(model.timeMs) / 1000
+        saveResume()
+        model.mpvLab = lab
+        let changed = e != model.engine
+        model.use(e)
+        if !changed && e == .mpv && lab == .normal { return }
+        if isLive { openLive() } else if let v = current { openVod(v, from: at > 0 ? at : nil) }
+        show(e == .mpv ? "المحرّك: mpv" + (lab == .normal ? "" : " — " + lab.rawValue) : "المحرّك: VLC")
+        scheduleHide()
+    }
+
+    /// Picture in picture from mpv: continue in VLC, which starts the floating window as soon as it plays.
+    private func pipViaVLC() {
+        model.pipWhenReady = true
+        switchEngine(.vlc)
+        show("صورة داخل صورة تعمل بمحرّك VLC — ينتقل الآن")
+    }
+
+    private func changeSubScale(_ step: Double) {
+        let v = min(3.0, max(0.5, ((MPVSubScale.value + step) * 10).rounded() / 10))
+        MPVSubScale.value = v
+        model.mpv.setAsync("sub-scale", String(format: "%.2f", v))
+        show("حجم الترجمة \(Int((v * 100).rounded()))٪")
+    }
+
     private func openMPV(_ lab: MPVLab = .normal) {
+        switchEngine(.mpv, lab: lab); return
         guard let v = current, let url = URL(string: v.url) else { return }
         saveResume()
         let start = Double(model.timeMs) / 1000
