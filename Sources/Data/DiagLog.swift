@@ -10,16 +10,23 @@ final class DiagLog: NSObject, VLCLogging {
     static let shared = DiagLog()
     var level: VLCLogLevel = .warning
     private let lock = NSLock()
-    private var lines: [String] = []
-    private var lastKey = ""
-    private var repeats = 0
-    private var session = ""
-    private let maxLines = 400
+    /// First lines of the playback (module choices, decoders, output) — never pushed out.
+    private var head: [String] = []
+    /// Latest lines.
+    private var tail: [String] = []
+    /// Very frequent messages are counted instead of stored after their first few occurrences.
+    private var counts: [String: Int] = [:]
+    private let headMax = 220, tailMax = 160, keepFirst = 3
+    private static let noisy: [(key: String, match: String)] = [
+        ("clock gap / new clock context", "clock gap"), ("clock gap / new clock context", "feeding synchro"),
+        ("clock gap / new clock context", "clock context"), ("picture too late", "picture is too late"),
+        ("picture displayed late", "picture displayed late"), ("deferring start", "deferring start"), ("buffering %", "Buffering ")]
     private static let interesting = try! NSRegularExpression(
-        pattern: "(sub|spu|libass|freetype|font|decoder|codec|vout|display|module|ssa|render|osd|blend|filter|placebo|pl_scale|dovi|dolby|opengl|gles|hdr|videotoolbox|avcodec)", options: [.caseInsensitive])
+        pattern: "(sub|spu|libass|freetype|font|decoder|codec|vout|display|module|ssa|render|osd|blend|filter|placebo|pl_scale|dovi|dolby|opengl|gles|hdr|videotoolbox|avcodec|demux|mkv|matroska|clock|pcr|es_out|track)",
+        options: [.caseInsensitive])
 
     func beginSession(_ title: String) {
-        lock.lock(); lines.removeAll(); lastKey = ""; repeats = 0; session = title; lock.unlock()
+        lock.lock(); head.removeAll(); tail.removeAll(); counts.removeAll(); lock.unlock()
     }
 
     func handleMessage(_ message: String, logLevel level: VLCLogLevel, context: VLCLogContext?) {
@@ -27,8 +34,7 @@ final class DiagLog: NSObject, VLCLogging {
         let objectType = context?.objectType ?? ""
         if level == .debug || level == .info {
             let probe = module + " " + objectType + " " + message
-            let r = NSRange(probe.startIndex..., in: probe)
-            guard Self.interesting.firstMatch(in: probe, range: r) != nil else { return }
+            guard Self.interesting.firstMatch(in: probe, range: NSRange(probe.startIndex..., in: probe)) != nil else { return }
         }
         let tag: String
         switch level {
@@ -37,22 +43,27 @@ final class DiagLog: NSObject, VLCLogging {
         case .info: tag = "I"
         default: tag = "D"
         }
-        // Fold repeats: same module + same text once digits are ignored.
-        let key = module + "|" + message.replacingOccurrences(of: "[0-9]+", with: "#", options: .regularExpression)
         lock.lock(); defer { lock.unlock() }
-        if key == lastKey, !lines.isEmpty {
-            repeats += 1
-            let base = lines[lines.count - 1].components(separatedBy: "  (×").first ?? lines[lines.count - 1]
-            lines[lines.count - 1] = base + "  (×\(repeats + 1))"
-            return
+        if let n = Self.noisy.first(where: { message.contains($0.match) }) {
+            let c = (counts[n.key] ?? 0) + 1
+            counts[n.key] = c
+            if c > keepFirst * 5 { return }      // the clock family logs 5 lines per event
         }
-        lastKey = key; repeats = 0
-        lines.append("[\(tag)] \(module)\(objectType.isEmpty ? "" : "/" + objectType): \(message)")
-        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+        let line = "[\(tag)] \(module)\(objectType.isEmpty ? "" : "/" + objectType): \(message)"
+        if head.count < headMax { head.append(line); return }
+        tail.append(line)
+        if tail.count > tailMax { tail.removeFirst(tail.count - tailMax) }
     }
 
-    func recent(_ n: Int) -> [String] {
+    /// Start of the playback, a count of the frequent messages, then the latest lines.
+    func report() -> [String] {
         lock.lock(); defer { lock.unlock() }
-        return Array(lines.suffix(n))
+        var out = ["[بداية التشغيل]"] + head
+        if !counts.isEmpty {
+            out.append("[رسائل متكررة — العدد الكلي منذ بداية التشغيل]")
+            for (k, v) in counts.sorted(by: { $0.key < $1.key }) { out.append("  \(k): \(v)") }
+        }
+        if !tail.isEmpty { out.append("[آخر الأسطر]"); out += tail }
+        return out
     }
 }

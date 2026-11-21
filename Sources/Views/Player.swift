@@ -88,6 +88,8 @@ final class PlayerModel: ObservableObject {
     private var live = false
     /// Test switch from the subtitle panel: decode SSA/ASS with VLC's plain text decoder (subsdec) instead of libass.
     var plainSubtitles = false
+    /// Test switch: read the file with FFmpeg's demuxer instead of VLC's own MKV demuxer.
+    var ffmpegDemux = false
     /// Subtitle track to re-select after a reopen (VLC track id).
     var pendingSubtitleId: String?
     private var stall = StallDetector()
@@ -119,6 +121,7 @@ final class PlayerModel: ObservableObject {
             m.addOption(":gl-filters=pl_scale")
         }
         if !codecs.isEmpty { m.addOption(":codec=" + (codecs + ["any"]).joined(separator: ",")) }
+        if ffmpegDemux { m.addOption(":demux=avformat,any") }
         if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
         if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -784,6 +787,9 @@ struct PlayerScreen: View {
                 panelRow(model.plainSubtitles ? "العرض كنص بسيط: مفعّل (اضغط للرجوع)" : "جرّب عرضها كنص بسيط (بدون libass)",
                          selected: model.plainSubtitles, icon: "textformat") { togglePlainSubtitles() }
                 panelNote("يعيد فتح الحلقة من نفس النقطة بنفس الترجمة، ويفك ترجمات ASS بمفكّك VLC النصي بدل libass. اختبار للمقارنة، يضيع تنسيق الألوان والمواقع.")
+                panelRow(model.ffmpegDemux ? "قراءة الملف بـ FFmpeg: مفعّل (اضغط للرجوع)" : "جرّب قراءة الملف بـ FFmpeg بدل قارئ MKV في VLC",
+                         selected: model.ffmpegDemux, icon: "doc.text.magnifyingglass") { toggleFFmpegDemux() }
+                panelNote("التشخيص أظهر أن ساعة التشغيل تنعاد كل ثانية مع هذا الملف. هذا الاختبار يغيّر قارئ الحاوية فقط، ليتبيّن هل المشكلة من قارئ MKV.")
             }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             if !isLive {
@@ -815,6 +821,9 @@ struct PlayerScreen: View {
             HStack(spacing: 10) {
                 panelButton("نسخ", "doc.on.doc") { UIPasteboard.general.string = diagText; show("تم نسخ التشخيص") }
                 panelButton("تحديث", "arrow.clockwise") { diagText = diagnostics() }
+                if let v = current {
+                    panelButton("نسخ رابط الملف", "link") { UIPasteboard.general.string = v.url; show("تم نسخ الرابط — فيه بيانات دخولك، لا تشاركه") }
+                }
             }
             .padding(.horizontal, 8).padding(.vertical, 6)
             panelRow(diagDetailed ? "تسجيل مفصّل: مفعّل" : "تسجيل مفصّل (لفحص الترجمة)", selected: diagDetailed, icon: "list.bullet.rectangle") {
@@ -839,7 +848,7 @@ struct PlayerScreen: View {
         l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
         l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
         l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
-        l.append("وضع Dolby Vision التجريبي: \(PlayerPrefs.softwareDecoding ? "مفعّل" : "متوقف") | ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف")")
+        l.append("وضع Dolby Vision التجريبي: \(PlayerPrefs.softwareDecoding ? "مفعّل" : "متوقف") | ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف") | قراءة FFmpeg: \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
         l.append("العنوان: \(title)")
         if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
         l.append("حالة المحرّك: \(stateName(model.player.state)) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
@@ -867,7 +876,7 @@ struct PlayerScreen: View {
         l.append("")
         l.append("— خطأ المحرّك الأخير: \(VLCLibrary.currentErrorMessage ?? "لا يوجد")")
         l.append("— سجل VLC لهذا التشغيل (\(diagDetailed ? "مفصّل: فك الترميز والترجمة والعرض" : "أخطاء وتحذيرات")، المكرر مطوي)")
-        l.append(contentsOf: DiagLog.shared.recent(200))
+        l.append(contentsOf: DiagLog.shared.report())
         var secrets: [String] = []
         if let x = library.xtream {
             secrets += [x.user, x.pass]
@@ -1073,6 +1082,14 @@ struct PlayerScreen: View {
             stoppedEarlyAt = at
             controls = true
         }
+    }
+
+    private func toggleFFmpegDemux() {
+        model.ffmpegDemux.toggle()
+        model.pendingSubtitleId = model.player.textTracks.first(where: \.isSelected)?.trackId
+        if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
+        closePanel()
+        show(model.ffmpegDemux ? "قراءة بـ FFmpeg — انتظر جملة حوار" : "رجوع لقارئ VLC")
     }
 
     /// A/B test for "selected but not drawn": reopen with the plain text subtitle decoder and the same track.
