@@ -977,6 +977,24 @@ struct PlayerScreen: View {
         l.append("— خطأ المحرّك الأخير: \(VLCLibrary.currentErrorMessage ?? "لا يوجد")")
         l.append("— سجل VLC لهذا التشغيل (\(diagDetailed ? "مفصّل: فك الترميز والترجمة والعرض" : "أخطاء وتحذيرات")، المكرر مطوي)")
         l.append(contentsOf: DiagLog.shared.report())
+        // The last mpv session rides along, so one "copy" carries both engines (0.8.5).
+        if let mpv = MPVSessionFile.previous() {
+            let lines = mpv.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+            let stages = lines.filter { $0.contains("[مرحلة]") }
+            let firstErrors = lines.filter { $0.contains("[error]") || $0.contains("[warn]") || $0.contains("[fatal]") || $0.contains("API ") }
+            var seen = Set<String>(); var distinct: [String] = []
+            for e in firstErrors {
+                let key = String(e.drop(while: { $0 != " " }))      // ignore the time stamp
+                if seen.insert(key).inserted { distinct.append(e) }
+            }
+            l.append("")
+            l.append("— آخر جلسة mpv (\(lines.count) سطر) | آخر سطر: \(lines.last ?? "-")")
+            l.append("المراحل:"); l.append(contentsOf: stages)
+            l.append("الأخطاء والتحذيرات المختلفة بترتيب ظهورها (أول ظهور):"); l.append(contentsOf: distinct.prefix(60))
+            l.append("أول 40 سطر:"); l.append(contentsOf: lines.prefix(40))
+        } else {
+            l.append(""); l.append("— آخر جلسة mpv: لا يوجد سجل (لم يُفتح mpv منذ 0.8.2)")
+        }
         var secrets: [String] = []
         if let x = library.xtream {
             secrets += [x.user, x.pass]
