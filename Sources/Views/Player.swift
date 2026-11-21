@@ -1,10 +1,6 @@
 import SwiftUI
 import UIKit
-#if VLC4
 import VLCKit
-#else
-import MobileVLCKit
-#endif
 import MediaPlayer
 
 /// What to play: a live channel inside its list (switch channels) or a film/episode inside its queue.
@@ -47,9 +43,8 @@ final class PlayerModel: ObservableObject {
 
     init() {
         videoView.backgroundColor = .black
-        player.drawable = videoView
-        #if VLC4
         videoView.player = player
+        player.drawable = videoView
         videoView.onPlay = { [weak self] in self?.command(.play) }
         videoView.onPause = { [weak self] in self?.command(.pause) }
         videoView.onReady = { [weak self] c in
@@ -58,27 +53,16 @@ final class PlayerModel: ObservableObject {
                 DispatchQueue.main.async { self?.pipActive = started }
             }
         }
-        #endif
     }
 
     func togglePiP() {
-        #if VLC4
         guard let c = videoView.windowController else { return }
         if pipActive { c.stopPictureInPicture() } else { c.startPictureInPicture() }
-        #endif
     }
 
     func startPiPIfPossible() {
-        #if VLC4
         guard !pipActive, playing, let c = videoView.windowController else { return }
         c.startPictureInPicture()
-        #endif
-    }
-
-    private func invalidatePiP() {
-        #if VLC4
-        invalidatePiP()
-        #endif
     }
     /// Values that change twice a second live in `clock`, observed only by the few small views that show them.
     /// Otherwise the whole player (and any open menu) would redraw on every tick: menus jumped under the finger.
@@ -116,13 +100,11 @@ final class PlayerModel: ObservableObject {
         engineSessionId = session
         guard let u = URL(string: url) else { failed = true; return }
         self.live = live
-        #if VLC4
         videoView.liveStream = live
-        #endif
         failed = false; endDecision = nil; viewerPaused = false; hasPlayed = false
         subDelay = 0; stall.reset(); buffering = true; timeMs = 0; lengthMs = 0
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
-        guard let m = Engine.media(u) else { failed = true; return }
+        guard let m = VLCMedia(url: u) else { failed = true; return }
         m.addOption(":network-caching=1500")
         // Decoder priority list. VLC tries the modules in order for every stream and skips those that cannot decode it,
         // so "subsdec" only takes the subtitle streams and "any" keeps the normal choice for the rest.
@@ -147,7 +129,7 @@ final class PlayerModel: ObservableObject {
         // Written so it compiles whether VLCKit imports these as optional or not.
         let t = (player.time as VLCTime?)?.intValue ?? 0
         let len = ((player.media as VLCMedia?)?.length as VLCTime?)?.intValue ?? 0
-        let st = Engine.state(player.state)
+        let st = Self.map(player.state)
         timeMs = t
         if len > 0 { lengthMs = len }
         let isPlaying = player.isPlaying
@@ -160,12 +142,24 @@ final class PlayerModel: ObservableObject {
             endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs)
         }
         buffering = !failed && endDecision == nil && stalled
-        if let want = pendingSubtitleId, engineSubtitleTracks.contains(where: { $0.id == want }) {
+        if let want = pendingSubtitleId, player.textTracks.contains(where: { $0.trackId == want }) {
             pendingSubtitleId = nil
             selectSubtitle(want)
         }
         let h = Int(player.videoSize.height)
         if h > 0 && h != videoHeight { videoHeight = h }
+    }
+
+    private static func map(_ s: VLCMediaPlayerState) -> EngineState {
+        switch s {
+        case .opening: return .opening
+        case .buffering: return .buffering
+        case .playing: return .playing
+        case .paused: return .paused
+        case .stopped, .stopping: return .stopped
+        case .error: return .error
+        default: return .buffering
+        }
     }
 
     var quality: String? {
@@ -183,7 +177,18 @@ final class PlayerModel: ObservableObject {
     enum Fit: String, CaseIterable { case fit = "ملاءمة", fill = "ملء الشاشة", wide = "16:9", classic = "4:3" }
 
     /// Picture shape. VLC copies the strings it is given.
-    func apply(_ f: Fit) { applyFitToEngine(f) }
+    func apply(_ f: Fit) {
+        player.videoAspectRatio = nil
+        player.setCropRatioWithNumerator(0, denominator: 0)
+        switch f {
+        case .fit: break
+        case .fill:
+            let b = UIScreen.main.bounds
+            player.setCropRatioWithNumerator(UInt32(max(b.width, b.height)), denominator: UInt32(min(b.width, b.height)))
+        case .wide: player.videoAspectRatio = "16:9"
+        case .classic: player.videoAspectRatio = "4:3"
+        }
+    }
 
     /// The only way to play/pause: on-screen buttons and Control Center both come here.
     func command(_ c: PauseCommand) {
@@ -191,14 +196,14 @@ final class PlayerModel: ObservableObject {
         if viewerPaused { player.pause() } else { player.play() }
         playing = !viewerPaused
         stall.reset()
-        invalidatePiP()
+        videoView.windowController?.invalidatePlaybackState()
     }
     func jump(_ seconds: Int32) { seek(toMs: Int32(max(0, Int(timeMs) + Int(seconds) * 1000))) }
     func seek(toMs ms: Int32) {
         let target = lengthMs > 0 ? min(ms, lengthMs - 1000) : ms
         player.time = VLCTime(int: max(0, target))
         timeMs = max(0, target); stall.reset()
-        invalidatePiP()
+        videoView.windowController?.invalidatePlaybackState()
     }
 
     /// App volume 0…200 (100 = normal).
@@ -220,31 +225,50 @@ final class PlayerModel: ObservableObject {
 
     /// A track as shown in the panel. `id` is VLC's own track id (not a position in an old list).
     struct Track: Identifiable { let id: String; let name: String; let selected: Bool }
-    var audioTracks: [Track] { engineAudioTracks }
-    var subtitleTracks: [Track] { engineSubtitleTracks }
+    var audioTracks: [Track] { player.audioTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) } }
+    var subtitleTracks: [Track] { player.textTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) } }
 
     /// What happened on the last track pick (shown in diagnostics).
     private(set) var lastPick = "لا يوجد"
 
-    /// Selects by engine track id, looked up in the engine's current list (never a position in an old list).
-    @discardableResult func selectAudio(_ id: String) -> Bool { select(id, audio: true, kind: "صوت") }
-    @discardableResult func selectSubtitle(_ id: String) -> Bool { select(id, audio: false, kind: "ترجمة") }
+    /// Selects by VLC track id, looked up in the engine's current list. Returns false if that track no longer exists.
+    @discardableResult func selectAudio(_ id: String) -> Bool { select(id, in: player.audioTracks, kind: "صوت") }
+    @discardableResult func selectSubtitle(_ id: String) -> Bool { select(id, in: player.textTracks, kind: "ترجمة") }
 
-    private func select(_ id: String, audio: Bool, kind: String) -> Bool {
-        guard let name = engineSelect(audio: audio, id: id) else {
+    private func select(_ id: String, in list: [VLCMediaPlayer.Track], kind: String) -> Bool {
+        guard let t = list.first(where: { $0.trackId == id }) else {
             lastPick = "\(kind): المسار \(id) غير موجود في قائمة المحرّك الحالية"
             return false
         }
-        lastPick = "\(kind): طُلب اختيار \(id) «\(name)»"
+        t.isSelectedExclusively = true
+        lastPick = "\(kind): طُلب اختيار \(t.trackId) «\(t.trackName)» (\(t.codecName()))"
+        let all = list
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self else { return }
-            let now = (audio ? self.engineAudioTracks : self.engineSubtitleTracks).filter(\.selected).map { "\($0.id) «\($0.name)»" }
-            self.lastPick += " → المحدد فعليًا بعد 0.6 ث: " + (now.isEmpty ? "لا شيء" : now.joined(separator: "، "))
+            let now = all.filter(\.isSelected).map { "\($0.trackId) «\($0.trackName)»" }
+            self?.lastPick += " → المحدد فعليًا بعد 0.6 ث: " + (now.isEmpty ? "لا شيء" : now.joined(separator: "، "))
         }
         return true
     }
 
-    func subtitlesOff() { engineSubtitlesOff(); lastPick = "ترجمة: إيقاف كل المسارات" }
+    func subtitlesOff() { player.deselectAllTextTracks(); lastPick = "ترجمة: إيقاف كل المسارات" }
+
+    /// Everything VLC exposes about one track; "غير متاح" where it exposes nothing.
+    static func describe(_ t: VLCMediaPlayer.Track) -> String {
+        var p = ["id=\(t.trackId)", "«\(t.trackName)»", "محدد=\(t.isSelected ? "نعم" : "لا")",
+                 "ترميز=\(t.codecName())", "fourcc=\(DiagRule.fourcc(t.fourcc))", "codec=\(DiagRule.fourcc(t.codec))",
+                 "لغة=\(t.language ?? "غير متاح")"]
+        p.append("profile=" + (t.profile >= 0 ? String(t.profile) : "غير متاح"))
+        p.append("level=" + (t.level >= 0 ? String(t.level) : "غير متاح"))
+        if t.bitrate > 0 { p.append("bitrate=\(t.bitrate)") }
+        if let d = t.trackDescription, !d.isEmpty { p.append("وصف=\(d)") }
+        if let v = t.video {
+            p.append("\(v.width)x\(v.height)")
+            if v.frameRateDenominator > 0 { p.append(String(format: "fps=%.3f", Double(v.frameRate) / Double(v.frameRateDenominator))) }
+        }
+        if let a = t.audio { p.append("قنوات=\(a.channelsNumber)"); p.append("rate=\(a.rate)") }
+        if let x = t.text { p.append("ترميز النص=\(x.encoding ?? "غير متاح")") }
+        return p.joined(separator: " | ")
+    }
 
     // Lock screen / Control Center.
     private var remoteTargets: [Any] = []
@@ -818,16 +842,16 @@ struct PlayerScreen: View {
         var l: [String] = []
         l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
         l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
-        l.append("المحرّك: \(Engine.name)")
+        l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
         l.append("ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف") | قراءة FFmpeg: \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
         l.append("العنوان: \(title)")
         if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
-        l.append("حالة المحرّك: \(stateName(Engine.state(model.player.state))) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
+        l.append("حالة المحرّك: \(stateName(model.player.state)) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
         l.append("")
         l.append("— الفيديو (من VLC)")
-        let rep = model.engineTrackReport()
-        if rep.video.isEmpty { l.append("لا توجد مسارات فيديو معروفة بعد") }
-        l.append(contentsOf: rep.video)
+        let vt = model.player.videoTracks
+        if vt.isEmpty { l.append("لا توجد مسارات فيديو معروفة بعد") }
+        vt.forEach { l.append(PlayerModel.describe($0)) }
         l.append("حجم الصورة المعروض: \(Int(model.player.videoSize.width))x\(Int(model.player.videoSize.height))")
         l.append("معلومات الألوان (HDR10 / Dolby Vision / transfer / primaries) من VLC: غير متاح — VLCKit لا يكشفها")
         l.append("")
@@ -835,16 +859,17 @@ struct PlayerScreen: View {
         if let v = current, !v.probe.isEmpty { l.append(contentsOf: v.probe) } else { l.append("غير متاح — المزوّد لم يرسل بيانات الملف") }
         l.append("")
         l.append("— الصوت (من VLC)")
-        l.append(contentsOf: rep.audio)
+        model.player.audioTracks.forEach { l.append(PlayerModel.describe($0)) }
         l.append("")
         l.append("— الترجمة (من VLC)")
-        if rep.text.isEmpty { l.append("لا توجد مسارات ترجمة") }
-        l.append(contentsOf: rep.text)
-        l.append("المحدد الآن: " + (model.subtitleTracks.filter(\.selected).map(\.id).joined(separator: "، ").nilIfEmpty ?? "لا شيء"))
+        let tt = model.player.textTracks
+        if tt.isEmpty { l.append("لا توجد مسارات ترجمة") }
+        tt.forEach { l.append(PlayerModel.describe($0)) }
+        l.append("المحدد الآن: " + (tt.filter(\.isSelected).map(\.trackId).joined(separator: "، ").nilIfEmpty ?? "لا شيء"))
         l.append("تأخير الترجمة: \(model.subDelay) ث | تفضيل لغة الترجمة: \(PlayerPrefs.subs.isEmpty ? "بدون" : PlayerPrefs.subs)")
         l.append("آخر اختيار: \(model.lastPick)")
         l.append("")
-        l.append("— خطأ المحرّك الأخير: \(Engine.lastError)")
+        l.append("— خطأ المحرّك الأخير: \(VLCLibrary.currentErrorMessage ?? "لا يوجد")")
         l.append("— سجل VLC لهذا التشغيل (\(diagDetailed ? "مفصّل: فك الترميز والترجمة والعرض" : "أخطاء وتحذيرات")، المكرر مطوي)")
         l.append(contentsOf: DiagLog.shared.report())
         var secrets: [String] = []
@@ -855,15 +880,16 @@ struct PlayerScreen: View {
         return DiagRule.redact(l.joined(separator: "\n"), secrets: secrets)
     }
 
-    private func stateName(_ s: EngineState) -> String {
+    private func stateName(_ s: VLCMediaPlayerState) -> String {
         switch s {
         case .opening: return "يفتح"
         case .buffering: return "تخزين"
         case .playing: return "يعمل"
         case .paused: return "متوقف مؤقتًا"
         case .stopped: return "متوقف"
-        case .ended: return "انتهى"
+        case .stopping: return "يتوقف"
         case .error: return "خطأ"
+        default: return "غير معروف"
         }
     }
 
@@ -1055,7 +1081,7 @@ struct PlayerScreen: View {
 
     private func toggleFFmpegDemux() {
         model.ffmpegDemux.toggle()
-        model.pendingSubtitleId = model.subtitleTracks.first(where: \.selected)?.id
+        model.pendingSubtitleId = model.player.textTracks.first(where: \.isSelected)?.trackId
         if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
         closePanel()
         show(model.ffmpegDemux ? "قراءة بـ FFmpeg — انتظر جملة حوار" : "رجوع لقارئ VLC")
@@ -1064,7 +1090,7 @@ struct PlayerScreen: View {
     /// A/B test for "selected but not drawn": reopen with the plain text subtitle decoder and the same track.
     private func togglePlainSubtitles() {
         model.plainSubtitles.toggle()
-        model.pendingSubtitleId = model.subtitleTracks.first(where: \.selected)?.id
+        model.pendingSubtitleId = model.player.textTracks.first(where: \.isSelected)?.trackId
         if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
         closePanel()
         show(model.plainSubtitles ? "ترجمة نصية بسيطة — انتظر جملة حوار" : "رجوع لمفكّك الترجمة العادي")

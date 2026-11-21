@@ -1,8 +1,6 @@
 import SwiftUI
 import AVFoundation
-#if VLC4
 import VLCKit
-#endif
 
 enum Theme {
     static let bg = Color(red: 14 / 255, green: 20 / 255, blue: 27 / 255)
@@ -21,9 +19,7 @@ struct ShashaApp: App {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
         // VLC errors/warnings kept in memory for "Copy playback diagnostics".
-        #if VLC4
         VLCLibrary.shared().loggers = [DiagLog.shared]
-        #endif
     }
 
     var body: some Scene {

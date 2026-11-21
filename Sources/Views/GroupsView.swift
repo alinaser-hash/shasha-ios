@@ -78,7 +78,7 @@ struct LanguageSettingsSection: View {
 
     var body: some View {
         Section {
-            if Engine.hasPiP { Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP) }
+            Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP)
         } header: { Text("المشغّل") } footer: {
             Text("صورة داخل صورة: إذا خرجت من التطبيق والفيديو شغّال يكمل في نافذة صغيرة، أو من زر ⧉ في المشغّل.")
         }
