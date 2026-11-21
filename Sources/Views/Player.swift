@@ -110,16 +110,9 @@ final class PlayerModel: ObservableObject {
         // so "subsdec" only takes the subtitle streams and "any" keeps the normal choice for the rest.
         var codecs: [String] = []
         if plainSubtitles { codecs.append("subsdec") }
-        if PlayerPrefs.softwareDecoding {
-            // Dolby Vision mode (experimental): FFmpeg decoding + libplacebo pl_scale filter.
-            codecs.append("avcodec")
-            m.addOption(":avcodec-hw=none")
-            // The diagnostics showed VLC drawing through "samplebufferdisplay" (AVSampleBufferDisplayLayer, used for PiP),
-            // which cannot run OpenGL filters, so pl_scale never ran. Ask for the OpenGL ES output in this mode
-            // ("any" keeps a picture if none of these names exist). Picture in picture is not available in this mode.
-            m.addOption(":vout=opengles2,opengl,gl,any")
-            m.addOption(":gl-filters=pl_scale")
-        }
+        // A "Dolby Vision mode" (FFmpeg decoding + OpenGL output + libplacebo pl_scale) was tried in 0.6.5–0.6.8 and removed:
+        // on the owner's iPhone the colours did not change, VLC logged "Failed to create video converter" and frames
+        // arrived late. Dolby Vision profile 5 is flagged from the provider's data instead (see CopyRule.isDolbyVision5).
         if !codecs.isEmpty { m.addOption(":codec=" + (codecs + ["any"]).joined(separator: ",")) }
         if ffmpegDemux { m.addOption(":demux=avformat,any") }
         if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
@@ -814,9 +807,10 @@ struct PlayerScreen: View {
                 panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
-            panelHeader("وضع Dolby Vision (تجريبي)")
-            panelRow(PlayerPrefs.softwareDecoding ? "مفعّل — اضغط للإيقاف" : "تشغيل وضع Dolby Vision", selected: PlayerPrefs.softwareDecoding, icon: "sparkles.tv") { switchDecoder() }
-            panelNote("اختبار: يفك الفيديو بـ FFmpeg ويعرضه عبر OpenGL مع مرشّح libplacebo (pl_scale) لمعالجة Dolby Vision. بدون صورة داخل صورة في هذا الوضع، وأثقل على الجوال. بعد التشغيل افتح التشخيص لمعرفة هل اشتغل المرشّح.")
+            if let v = current, CopyRule.isDolbyVision5(v.probe) {
+                panelHeader("Dolby Vision 5")
+                panelNote("حسب بيانات المزوّد هذه النسخة Dolby Vision profile 5 بدون طبقة HDR10، ومشغّل VLC على الآيفون لا يعالجها، فتطلع الألوان خضراء/بنفسجية. اختر نسخة أخرى من صفحة المسلسل أو الفيلم (قسم «نسخ أخرى»).")
+            }
         case .diag:
             HStack(spacing: 10) {
                 panelButton("نسخ", "doc.on.doc") { UIPasteboard.general.string = diagText; show("تم نسخ التشخيص") }
@@ -848,7 +842,7 @@ struct PlayerScreen: View {
         l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
         l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
         l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
-        l.append("وضع Dolby Vision التجريبي: \(PlayerPrefs.softwareDecoding ? "مفعّل" : "متوقف") | ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف") | قراءة FFmpeg: \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
+        l.append("ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف") | قراءة FFmpeg: \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
         l.append("العنوان: \(title)")
         if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
         l.append("حالة المحرّك: \(stateName(model.player.state)) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
@@ -1099,24 +1093,6 @@ struct PlayerScreen: View {
         if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
         closePanel()
         show(model.plainSubtitles ? "ترجمة نصية بسيطة — انتظر جملة حوار" : "رجوع لمفكّك الترجمة العادي")
-    }
-
-    /// Reopens the same item at the same point with the other decoder (remembered for next time).
-    private func switchDecoder() {
-        UserDefaults.standard.set(!PlayerPrefs.softwareDecoding, forKey: PlayerPrefs.softwareKey)
-        if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
-        show(PlayerPrefs.softwareDecoding ? "وضع Dolby Vision مفعّل" : "وضع Dolby Vision متوقف")
-    }
-
-    /// "From the start": reopen without the start-time option. A seek to 0 right after opening is ignored by VLC
-    /// (the stream is still opening at the resume point), so the video stayed where it had stopped.
-    private func restartFromBeginning() {
-        resumeAt = nil
-        resumeTask?.cancel()
-        guard let v = current else { return }
-        openVod(v, from: 0)
-        show("من البداية")
-        scheduleHide()
     }
 
     private func retryFrom(_ at: Int32) {

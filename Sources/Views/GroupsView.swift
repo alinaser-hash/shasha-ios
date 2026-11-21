@@ -75,14 +75,12 @@ struct LanguageSettingsSection: View {
     @AppStorage(PlayerPrefs.audioKey) private var audio = ""
     @AppStorage(PlayerPrefs.subsKey) private var subs = ""
     @AppStorage(PlayerPrefs.autoPiPKey) private var autoPiP = true
-    @AppStorage(PlayerPrefs.softwareKey) private var software = false
 
     var body: some View {
         Section {
             Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP)
-            Toggle("وضع Dolby Vision (تجريبي)", isOn: $software)
         } header: { Text("المشغّل") } footer: {
-            Text("صورة داخل صورة: إذا خرجت من التطبيق والفيديو شغّال يكمل في نافذة صغيرة، أو من زر ⧉ في المشغّل.\nفك الترميز البرمجي: يصلّح الألوان الخضراء أو البنفسجية في بعض ملفات HDR / Dolby Vision، لكنه أثقل على البطارية. تقدر تجرّبه لفيديو واحد من قائمة شكل الصورة في المشغّل.")
+            Text("صورة داخل صورة: إذا خرجت من التطبيق والفيديو شغّال يكمل في نافذة صغيرة، أو من زر ⧉ في المشغّل.")
         }
         Section {
             Picker("الصوت", selection: $audio) {

@@ -133,6 +133,13 @@ struct MovieDetail: View {
     @EnvironmentObject var library: Library
     let movie: Movie
     @Binding var play: PlayItem?
+
+    private var otherMovies: [Movie] {
+        let k = CopyRule.key(movie.name)
+        guard !k.isEmpty else { return [] }
+        let ok = library.allowedFilter(.movies)
+        return library.movies.filter { $0.id != movie.id && ok($0.categoryId) && CopyRule.key($0.name) == k }
+    }
     @State private var info = MovieInfo()
     @Environment(\.openURL) private var openURL
 
@@ -154,6 +161,25 @@ struct MovieDetail: View {
                 if let t = info.trailerURL {
                     Button { openURL(t) } label: { Label("الإعلان", systemImage: "play.rectangle").frame(maxWidth: .infinity).padding(.vertical, 4) }
                         .buttonStyle(.bordered).padding(.horizontal)
+                }
+                if CopyRule.isDolbyVision5(info.probe) {
+                    Label("هذه النسخة Dolby Vision 5 بدون طبقة HDR10. ألوانها تطلع خضراء/بنفسجية على الآيفون (حسب بيانات المزوّد). اختر نسخة أخرى إن وجدت.",
+                          systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(.orange).padding(.horizontal)
+                }
+                let copies = otherMovies
+                if !copies.isEmpty {
+                    Text("نسخ أخرى (\(copies.count))").font(.headline).padding(.horizontal)
+                    ForEach(copies) { c in
+                        NavigationLink { MovieDetail(movie: c, play: $play) } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(c.name).lineLimit(2).foregroundStyle(.primary)
+                                Text(library.vodCats.first { $0.id == c.categoryId }?.name ?? "").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        .padding(.horizontal)
+                    }
                 }
                 if let p = info.plot { Text(p).padding(.horizontal) }
             }
@@ -228,6 +254,14 @@ struct SeriesDetail: View {
     @EnvironmentObject var library: Library
     let show: Show
     @Binding var play: PlayItem?
+
+    /// The same series in other provider groups (4K / FHD / Arabic-subbed copies…).
+    private var otherShows: [Show] {
+        let k = CopyRule.key(show.name)
+        guard !k.isEmpty else { return [] }
+        let ok = library.allowedFilter(.series)
+        return library.shows.filter { $0.id != show.id && ok($0.categoryId) && CopyRule.key($0.name) == k }
+    }
     @State private var episodes: [Episode] = []
     @State private var season = 1
     @State private var loading = true
@@ -246,6 +280,25 @@ struct SeriesDetail: View {
                 if let next = nextEpisode {
                     Button { open(next) } label: { Label("استكمال: الموسم \(next.season) · الحلقة \(next.number)", systemImage: "play.fill").frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent)
+                }
+            }
+            if episodes.contains(where: { CopyRule.isDolbyVision5($0.probe) }) {
+                Section {
+                    Label("هذه النسخة Dolby Vision 5 بدون طبقة HDR10. ألوانها تطلع خضراء/بنفسجية على الآيفون (حسب بيانات المزوّد). اختر نسخة أخرى إن وجدت.",
+                          systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(.orange)
+                }
+            }
+            let copies = otherShows
+            if !copies.isEmpty {
+                Section("نسخ أخرى (\(copies.count))") {
+                    ForEach(copies) { c in
+                        NavigationLink { SeriesDetail(show: c, play: $play) } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(c.name).lineLimit(2)
+                                Text(library.seriesCats.first { $0.id == c.categoryId }?.name ?? "").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
             }
             let seasons = Array(Set(episodes.map(\.season))).sorted()

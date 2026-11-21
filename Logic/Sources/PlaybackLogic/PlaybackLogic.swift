@@ -262,3 +262,26 @@ enum DiagRule {
         return out
     }
 }
+
+// MARK: - Copies of the same title and Dolby Vision 5
+
+enum CopyRule {
+    /// Same work across provider groups: "4K-AMZ - The Lord of the Rings: The Rings of Power (2022) (US)" and
+    /// "The Lord of the Rings The Rings of Power" give the same key. Drops a short leading tag ("4K-NF - "),
+    /// bracketed parts, and punctuation.
+    static func key(_ name: String) -> String {
+        var s = name
+        if let r = s.range(of: #"^\s*[A-Za-z0-9|\[\]]{1,4}([\-|][A-Za-z0-9]{1,6}){0,3}\s*[-:|]\s+"#, options: .regularExpression) { s.removeSubrange(r) }
+        s = s.replacingOccurrences(of: #"\([^)]*\)|\[[^\]]*\]"#, with: " ", options: .regularExpression)
+        s = s.lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: " ", options: .regularExpression)
+        return s.split(separator: " ").joined(separator: " ")
+    }
+
+    /// Provider data says Dolby Vision profile 5 with no HDR10/SDR fallback layer: VLCKit on iPhone shows it green/purple.
+    static func isDolbyVision5(_ probe: [String]) -> Bool {
+        guard let line = probe.first(where: { $0.contains("DOVI") }) else { return false }
+        let p5 = line.contains("dv_profile=5")
+        let compat = line.range(of: #"dv_bl_signal_compatibility_id=(\d+)"#, options: .regularExpression).map { String(line[$0]) }
+        return p5 && (compat == nil || compat!.hasSuffix("=0"))
+    }
+}

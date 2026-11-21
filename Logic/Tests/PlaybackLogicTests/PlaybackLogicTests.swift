@@ -260,3 +260,21 @@ final class DiagRuleTests: XCTestCase {
         XCTAssertTrue(DiagRule.probeLines(video: nil, audio: nil).isEmpty)
     }
 }
+
+final class CopyRuleTests: XCTestCase {
+    func testSameWorkAcrossTags() {
+        let a = CopyRule.key("4K-AMZ - The Lord of the Rings: The Rings of Power (2022) (US)")
+        XCTAssertEqual(a, "the lord of the rings the rings of power")
+        XCTAssertEqual(CopyRule.key("AR - The Lord of the Rings The Rings of Power"), a)
+        XCTAssertEqual(CopyRule.key("The Lord of the Rings: The Rings of Power [4K]"), a)
+        XCTAssertEqual(CopyRule.key("4K-NF - The Diplomat (2023) (US)"), "the diplomat")
+    }
+    func testDifferentWorksStayDifferent() {
+        XCTAssertNotEqual(CopyRule.key("The Diplomat"), CopyRule.key("The Diplomat's Wife"))
+    }
+    func testDolbyVision5() {
+        XCTAssertTrue(CopyRule.isDolbyVision5(["فيديو side data: DOVI configuration record (dv_profile=5, dv_bl_signal_compatibility_id=0)"]))
+        XCTAssertFalse(CopyRule.isDolbyVision5(["فيديو side data: DOVI configuration record (dv_profile=8, dv_bl_signal_compatibility_id=1)"]))
+        XCTAssertFalse(CopyRule.isDolbyVision5(["فيديو color_transfer: bt709"]))
+    }
+}
