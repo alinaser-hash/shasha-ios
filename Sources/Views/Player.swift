@@ -112,6 +112,10 @@ final class PlayerModel: ObservableObject {
             // Dolby Vision mode (experimental): FFmpeg decoding + libplacebo pl_scale filter.
             codecs.append("avcodec")
             m.addOption(":avcodec-hw=none")
+            // The diagnostics showed VLC drawing through "samplebufferdisplay" (AVSampleBufferDisplayLayer, used for PiP),
+            // which cannot run OpenGL filters, so pl_scale never ran. Ask for the OpenGL ES output in this mode
+            // ("any" keeps a picture if none of these names exist). Picture in picture is not available in this mode.
+            m.addOption(":vout=opengles2,opengl,gl,any")
             m.addOption(":gl-filters=pl_scale")
         }
         if !codecs.isEmpty { m.addOption(":codec=" + (codecs + ["any"]).joined(separator: ",")) }
@@ -806,7 +810,7 @@ struct PlayerScreen: View {
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             panelHeader("وضع Dolby Vision (تجريبي)")
             panelRow(PlayerPrefs.softwareDecoding ? "مفعّل — اضغط للإيقاف" : "تشغيل وضع Dolby Vision", selected: PlayerPrefs.softwareDecoding, icon: "sparkles.tv") { switchDecoder() }
-            panelNote("يفك الفيديو بـ FFmpeg ويمرّره على مرشّح libplacebo في VLC 4 لتصحيح ألوان Dolby Vision. أثقل على الجوال.")
+            panelNote("اختبار: يفك الفيديو بـ FFmpeg ويعرضه عبر OpenGL مع مرشّح libplacebo (pl_scale) لمعالجة Dolby Vision. بدون صورة داخل صورة في هذا الوضع، وأثقل على الجوال. بعد التشغيل افتح التشخيص لمعرفة هل اشتغل المرشّح.")
         case .diag:
             HStack(spacing: 10) {
                 panelButton("نسخ", "doc.on.doc") { UIPasteboard.general.string = diagText; show("تم نسخ التشخيص") }

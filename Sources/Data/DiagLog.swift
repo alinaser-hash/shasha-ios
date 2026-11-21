@@ -16,7 +16,7 @@ final class DiagLog: NSObject, VLCLogging {
     private var session = ""
     private let maxLines = 400
     private static let interesting = try! NSRegularExpression(
-        pattern: "(sub|spu|ass|freetype|text|font|decoder|codec|vout|display|module|libass|ssa|render|osd|blend)", options: [.caseInsensitive])
+        pattern: "(sub|spu|libass|freetype|font|decoder|codec|vout|display|module|ssa|render|osd|blend|filter|placebo|pl_scale|dovi|dolby|opengl|gles|hdr|videotoolbox|avcodec)", options: [.caseInsensitive])
 
     func beginSession(_ title: String) {
         lock.lock(); lines.removeAll(); lastKey = ""; repeats = 0; session = title; lock.unlock()
