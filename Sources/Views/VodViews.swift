@@ -146,7 +146,8 @@ struct MovieDetail: View {
                     .foregroundStyle(Theme.accent).font(.subheadline).padding(.horizontal)
                 let key = "movie:" + movie.id
                 Button {
-                    play = .vod(list: [VodPlay(title: movie.name, url: movie.url, key: key, query: SubQuery.clean(movie.name))], index: 0)
+                    play = .vod(list: [VodPlay(title: movie.name, url: movie.url, key: key, query: SubQuery.clean(movie.name),
+                                                  probe: info.probe, container: movie.ext)], index: 0)
                 } label: {
                     Label(Store.position(key) != nil ? "استكمال" : "تشغيل", systemImage: "play.fill").frame(maxWidth: .infinity).padding(.vertical, 6)
                 }.buttonStyle(.borderedProminent).padding(.horizontal)
@@ -290,7 +291,8 @@ struct SeriesDetail: View {
         let base = SubQuery.clean(show.name).name
         let queue = episodes.map { ep in
             VodPlay(title: "\(show.name) · م\(ep.season) ح\(ep.number)", url: x.episodeURL(ep.id, ep.ext), key: key(ep),
-                    query: SubQuery(name: base, season: ep.season, episode: ep.number), season: ep.season, number: ep.number)
+                    query: SubQuery(name: base, season: ep.season, episode: ep.number), season: ep.season, number: ep.number,
+                    probe: ep.probe, container: ep.ext)
         }
         Store.remember(episodes: queue.map(\.key), show: show.id)
         play = .vod(list: queue, index: i)

@@ -98,7 +98,8 @@ struct Xtream {
                     let info = e["info"] as? [String: Any]
                     out.append(Episode(id: id, title: J.s(e["title"]) ?? "", season: J.i(e["season"]) == 0 ? (Int(seasonKey) ?? 1) : J.i(e["season"]),
                                        number: J.i(e["episode_num"]), ext: J.s(e["container_extension"]) ?? "mp4",
-                                       plot: J.s(info?["plot"]), image: J.s(info?["movie_image"])))
+                                       plot: J.s(info?["plot"]), image: J.s(info?["movie_image"]),
+                                       probe: DiagRule.probeLines(video: info?["video"] as? [String: Any], audio: info?["audio"] as? [String: Any])))
                 }
             }
         }
@@ -127,7 +128,8 @@ struct Xtream {
     func movieInfo(_ id: String) async -> MovieInfo {
         guard let d = try? await api("get_vod_info", ["vod_id": id]) as? [String: Any], let info = d["info"] as? [String: Any] else { return MovieInfo() }
         let backdrop = (info["backdrop_path"] as? [Any])?.first.flatMap { J.s($0) } ?? J.s(info["backdrop_path"])
-        return MovieInfo(plot: J.s(info["plot"]) ?? J.s(info["description"]), genre: J.s(info["genre"]), year: J.s(info["releasedate"]).map { String($0.prefix(4)) },
+        return MovieInfo(probe: DiagRule.probeLines(video: info["video"] as? [String: Any], audio: info["audio"] as? [String: Any]),
+                         plot: J.s(info["plot"]) ?? J.s(info["description"]), genre: J.s(info["genre"]), year: J.s(info["releasedate"]).map { String($0.prefix(4)) },
                          duration: J.s(info["duration"]), backdrop: backdrop,
                          trailer: J.s(info["youtube_trailer"]) ?? J.s(info["trailer"]))
     }

@@ -208,3 +208,57 @@ enum GroupOrderRule {
         return out
     }
 }
+
+// MARK: - Diagnostics
+
+enum DiagRule {
+    /// Removes stream links and any secret (user name, password, server) from text before it is shown or copied.
+    static func redact(_ text: String, secrets: [String]) -> String {
+        var s = text.replacingOccurrences(of: #"[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>]+"#, with: "[رابط مخفي]", options: .regularExpression)
+        for secret in secrets where secret.count >= 3 {
+            s = s.replacingOccurrences(of: secret, with: "•••")
+        }
+        return s
+    }
+
+    /// Four-character code as text ("hevc", "dvhe", "subt"); VLC stores them little-endian.
+    static func fourcc(_ v: UInt32) -> String {
+        guard v != 0 else { return "غير متاح" }
+        let bytes = [UInt8(v & 0xff), UInt8((v >> 8) & 0xff), UInt8((v >> 16) & 0xff), UInt8((v >> 24) & 0xff)]
+        let printable = bytes.allSatisfy { $0 >= 32 && $0 < 127 }
+        return printable ? String(bytes: bytes, encoding: .ascii) ?? String(format: "0x%08x", v) : String(format: "0x%08x", v)
+    }
+
+    /// Readable lines from the provider's ffprobe data (Xtream "info.video" / "info.audio"), when it sends it.
+    /// Only keys that are present are printed; nothing is guessed.
+    static func probeLines(video: [String: Any]?, audio: [String: Any]?) -> [String] {
+        var out: [String] = []
+        func str(_ v: Any?) -> String? {
+            if let s = v as? String, !s.isEmpty { return s }
+            if let n = v as? NSNumber { return n.stringValue }
+            return nil
+        }
+        if let v = video {
+            for (k, label) in [("codec_name", "ترميز"), ("codec_tag_string", "وسم الترميز"), ("profile", "profile"), ("level", "level"),
+                               ("width", "العرض"), ("height", "الارتفاع"), ("pix_fmt", "pix_fmt"), ("color_range", "color_range"),
+                               ("color_space", "color_space"), ("color_transfer", "color_transfer"), ("color_primaries", "color_primaries"),
+                               ("r_frame_rate", "fps")] {
+                if let s = str(v[k]) { out.append("فيديو \(label): \(s)") }
+            }
+            for sd in v["side_data_list"] as? [[String: Any]] ?? [] {
+                let type = str(sd["side_data_type"]) ?? "side data"
+                var parts: [String] = []
+                for k in ["dv_version_major", "dv_profile", "dv_level", "rpu_present_flag", "el_present_flag", "bl_present_flag", "dv_bl_signal_compatibility_id"] {
+                    if let s = str(sd[k]) { parts.append("\(k)=\(s)") }
+                }
+                out.append("فيديو side data: \(type)" + (parts.isEmpty ? "" : " (" + parts.joined(separator: ", ") + ")"))
+            }
+        }
+        if let a = audio {
+            for (k, label) in [("codec_name", "ترميز"), ("profile", "profile"), ("channels", "قنوات"), ("channel_layout", "توزيع")] {
+                if let s = str(a[k]) { out.append("صوت \(label): \(s)") }
+            }
+        }
+        return out
+    }
+}

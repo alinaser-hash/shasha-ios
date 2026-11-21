@@ -71,9 +71,13 @@ struct Episode: Identifiable, Hashable {
     let ext: String
     let plot: String?
     let image: String?
+    /// Provider's ffprobe summary for this file (empty when the provider sends none).
+    var probe: [String] = []
 }
 
 struct MovieInfo {
+    /// Provider's ffprobe summary (empty when the provider sends none).
+    var probe: [String] = []
     var plot: String?
     var genre: String?
     var year: String?

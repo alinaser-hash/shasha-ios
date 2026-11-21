@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import VLCKit
 
 enum Theme {
     static let bg = Color(red: 14 / 255, green: 20 / 255, blue: 27 / 255)
@@ -17,6 +18,8 @@ struct ShashaApp: App {
         // Sound even with the silent switch on, and keep audio when the screen locks.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
+        // VLC errors/warnings kept in memory for "Copy playback diagnostics".
+        VLCLibrary.shared().loggers = [DiagLog.shared]
     }
 
     var body: some Scene {

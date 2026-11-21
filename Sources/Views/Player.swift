@@ -24,6 +24,9 @@ struct VodPlay: Hashable {
     var query: SubQuery
     var season: Int? = nil
     var number: Int? = nil
+    /// Provider's ffprobe lines, and the file extension from the link (for diagnostics only).
+    var probe: [String] = []
+    var container: String? = nil
 }
 
 // MARK: - Engine
@@ -209,12 +212,52 @@ final class PlayerModel: ObservableObject {
     /// Adds a downloaded subtitle file and switches to it.
     func addSubtitle(_ file: URL) { player.addPlaybackSlave(file, type: .subtitle, enforce: true) }
 
-    struct Track: Identifiable { let id: Int; let name: String; let selected: Bool }
-    var audioTracks: [Track] { player.audioTracks.enumerated().map { Track(id: $0.offset, name: $0.element.trackName, selected: $0.element.isSelected) } }
-    var subtitleTracks: [Track] { player.textTracks.enumerated().map { Track(id: $0.offset, name: $0.element.trackName, selected: $0.element.isSelected) } }
-    func selectAudio(_ i: Int) { let t = player.audioTracks; if t.indices.contains(i) { t[i].isSelectedExclusively = true } }
-    func selectSubtitle(_ i: Int) { let t = player.textTracks; if t.indices.contains(i) { t[i].isSelectedExclusively = true } }
-    func subtitlesOff() { player.deselectAllTextTracks() }
+    /// A track as shown in the panel. `id` is VLC's own track id (not a position in an old list).
+    struct Track: Identifiable { let id: String; let name: String; let selected: Bool }
+    var audioTracks: [Track] { player.audioTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) } }
+    var subtitleTracks: [Track] { player.textTracks.map { Track(id: $0.trackId, name: $0.trackName, selected: $0.isSelected) } }
+
+    /// What happened on the last track pick (shown in diagnostics).
+    private(set) var lastPick = "لا يوجد"
+
+    /// Selects by VLC track id, looked up in the engine's current list. Returns false if that track no longer exists.
+    @discardableResult func selectAudio(_ id: String) -> Bool { select(id, in: player.audioTracks, kind: "صوت") }
+    @discardableResult func selectSubtitle(_ id: String) -> Bool { select(id, in: player.textTracks, kind: "ترجمة") }
+
+    private func select(_ id: String, in list: [VLCMediaPlayerTrack], kind: String) -> Bool {
+        guard let t = list.first(where: { $0.trackId == id }) else {
+            lastPick = "\(kind): المسار \(id) غير موجود في قائمة المحرّك الحالية"
+            return false
+        }
+        t.isSelectedExclusively = true
+        lastPick = "\(kind): طُلب اختيار \(t.trackId) «\(t.trackName)» (\(t.codecName()))"
+        let all = list
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            let now = all.filter(\.isSelected).map { "\($0.trackId) «\($0.trackName)»" }
+            self?.lastPick += " → المحدد فعليًا بعد 0.6 ث: " + (now.isEmpty ? "لا شيء" : now.joined(separator: "، "))
+        }
+        return true
+    }
+
+    func subtitlesOff() { player.deselectAllTextTracks(); lastPick = "ترجمة: إيقاف كل المسارات" }
+
+    /// Everything VLC exposes about one track; "غير متاح" where it exposes nothing.
+    static func describe(_ t: VLCMediaPlayerTrack) -> String {
+        var p = ["id=\(t.trackId)", "«\(t.trackName)»", "محدد=\(t.isSelected ? "نعم" : "لا")",
+                 "ترميز=\(t.codecName())", "fourcc=\(DiagRule.fourcc(t.fourcc))", "codec=\(DiagRule.fourcc(t.codec))",
+                 "لغة=\(t.language ?? "غير متاح")"]
+        p.append("profile=" + (t.profile >= 0 ? String(t.profile) : "غير متاح"))
+        p.append("level=" + (t.level >= 0 ? String(t.level) : "غير متاح"))
+        if t.bitrate > 0 { p.append("bitrate=\(t.bitrate)") }
+        if let d = t.trackDescription, !d.isEmpty { p.append("وصف=\(d)") }
+        if let v = t.video {
+            p.append("\(v.width)x\(v.height)")
+            if v.frameRateDenominator > 0 { p.append(String(format: "fps=%.3f", Double(v.frameRate) / Double(v.frameRateDenominator))) }
+        }
+        if let a = t.audio { p.append("قنوات=\(a.channelsNumber)"); p.append("rate=\(a.rate)") }
+        if let x = t.text { p.append("ترميز النص=\(x.encoding ?? "غير متاح")") }
+        return p.joined(separator: " | ")
+    }
 
     // Lock screen / Control Center.
     private var remoteTargets: [Any] = []
@@ -309,7 +352,9 @@ struct PlayerScreen: View {
     @State private var panelTracks: [PlayerModel.Track] = []
     @State private var applePlayer: ApplePlayback?
 
-    enum Panel: String, Identifiable { case audio, subtitles, picture, speed; var id: String { rawValue } }
+    enum Panel: String, Identifiable { case audio, subtitles, picture, speed, diag; var id: String { rawValue } }
+    @State private var diagText = ""
+    @State private var diagDetailed = false
     @Environment(\.scenePhase) private var scenePhase
 
     enum GestureKind { case seek, brightness, volume }
@@ -657,6 +702,7 @@ struct PlayerScreen: View {
 
     private func openPanel(_ p: Panel) {
         hideTask?.cancel()
+        if p == .diag { diagText = diagnostics() }
         panelTracks = p == .audio ? model.audioTracks : p == .subtitles ? model.subtitleTracks : []
         withAnimation(.easeOut(duration: 0.18)) { panel = p }
     }
@@ -693,7 +739,7 @@ struct PlayerScreen: View {
     }
 
     private func panelTitle(_ p: Panel) -> String {
-        switch p { case .audio: return "الصوت"; case .subtitles: return "الترجمة"; case .picture: return "الصورة"; case .speed: return "السرعة" }
+        switch p { case .audio: return "الصوت"; case .subtitles: return "الترجمة"; case .picture: return "الصورة"; case .speed: return "السرعة"; case .diag: return "تشخيص التشغيل" }
     }
 
     @ViewBuilder private func panelRows(_ p: Panel) -> some View {
@@ -718,6 +764,7 @@ struct PlayerScreen: View {
                     model.selectSubtitle(t.id); refreshTracks(.subtitles); show("الترجمة: \(t.name)")
                 }
             }
+            panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             if !isLive {
                 panelHeader("من الإنترنت")
                 panelRow("بحث في OpenSubtitles…", icon: "globe") { closePanel(); sheet = .subs }
@@ -739,13 +786,85 @@ struct PlayerScreen: View {
                 panelRow("فتح بمشغّل Apple", icon: "apple.logo") { closePanel(); openApplePlayer() }
                 panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
+            panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             panelHeader("وضع Dolby Vision (تجريبي)")
             panelRow(PlayerPrefs.softwareDecoding ? "مفعّل — اضغط للإيقاف" : "تشغيل وضع Dolby Vision", selected: PlayerPrefs.softwareDecoding, icon: "sparkles.tv") { switchDecoder() }
             panelNote("يفك الفيديو بـ FFmpeg ويمرّره على مرشّح libplacebo في VLC 4 لتصحيح ألوان Dolby Vision. أثقل على الجوال.")
+        case .diag:
+            HStack(spacing: 10) {
+                panelButton("نسخ", "doc.on.doc") { UIPasteboard.general.string = diagText; show("تم نسخ التشخيص") }
+                panelButton("تحديث", "arrow.clockwise") { diagText = diagnostics() }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            panelRow(diagDetailed ? "تسجيل مفصّل: مفعّل" : "تسجيل مفصّل (لفحص الترجمة)", selected: diagDetailed, icon: "list.bullet.rectangle") {
+                diagDetailed.toggle()
+                DiagLog.shared.level = diagDetailed ? .debug : .warning
+                show(diagDetailed ? "فعّل الترجمة الآن ثم ارجع وانسخ" : "رجع التسجيل للأخطاء فقط")
+            }
+            Text(diagText).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                .environment(\.layoutDirection, .leftToRight)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
         case .speed:
             ForEach([Float(0.5), 0.75, 1, 1.25, 1.5, 2], id: \.self) { r in
                 panelRow(rateText(r), selected: model.rate == r) { model.setRate(r); show("السرعة \(rateText(r))") }
             }
+        }
+    }
+
+    /// Plain-text report of what the engine and the provider actually say. Links and login data are removed.
+    private func diagnostics() -> String {
+        let info = Bundle.main.infoDictionary
+        var l: [String] = []
+        l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
+        l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
+        l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
+        l.append("وضع Dolby Vision التجريبي: \(PlayerPrefs.softwareDecoding ? "مفعّل" : "متوقف")")
+        l.append("العنوان: \(title)")
+        if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
+        l.append("حالة المحرّك: \(stateName(model.player.state)) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
+        l.append("")
+        l.append("— الفيديو (من VLC)")
+        let vt = model.player.videoTracks
+        if vt.isEmpty { l.append("لا توجد مسارات فيديو معروفة بعد") }
+        vt.forEach { l.append(PlayerModel.describe($0)) }
+        l.append("حجم الصورة المعروض: \(Int(model.player.videoSize.width))x\(Int(model.player.videoSize.height))")
+        l.append("معلومات الألوان (HDR10 / Dolby Vision / transfer / primaries) من VLC: غير متاح — VLCKit لا يكشفها")
+        l.append("")
+        l.append("— بيانات المزوّد (ffprobe عند المزوّد)")
+        if let v = current, !v.probe.isEmpty { l.append(contentsOf: v.probe) } else { l.append("غير متاح — المزوّد لم يرسل بيانات الملف") }
+        l.append("")
+        l.append("— الصوت (من VLC)")
+        model.player.audioTracks.forEach { l.append(PlayerModel.describe($0)) }
+        l.append("")
+        l.append("— الترجمة (من VLC)")
+        let tt = model.player.textTracks
+        if tt.isEmpty { l.append("لا توجد مسارات ترجمة") }
+        tt.forEach { l.append(PlayerModel.describe($0)) }
+        l.append("المحدد الآن: " + (tt.filter(\.isSelected).map(\.trackId).joined(separator: "، ").nilIfEmpty ?? "لا شيء"))
+        l.append("تأخير الترجمة: \(model.subDelay) ث | تفضيل لغة الترجمة: \(PlayerPrefs.subs.isEmpty ? "بدون" : PlayerPrefs.subs)")
+        l.append("آخر اختيار: \(model.lastPick)")
+        l.append("")
+        l.append("— خطأ المحرّك الأخير: \(VLCLibrary.currentErrorMessage ?? "لا يوجد")")
+        l.append("— سجل VLC (\(diagDetailed ? "مفصّل" : "أخطاء وتحذيرات")، آخر 150 سطر)")
+        l.append(contentsOf: DiagLog.shared.recent(150))
+        var secrets: [String] = []
+        if let x = library.xtream {
+            secrets += [x.user, x.pass]
+            if let host = URL(string: x.server)?.host { secrets.append(host) }
+        }
+        return DiagRule.redact(l.joined(separator: "\n"), secrets: secrets)
+    }
+
+    private func stateName(_ s: VLCMediaPlayerState) -> String {
+        switch s {
+        case .opening: return "يفتح"
+        case .buffering: return "تخزين"
+        case .playing: return "يعمل"
+        case .paused: return "متوقف مؤقتًا"
+        case .stopped: return "متوقف"
+        case .stopping: return "يتوقف"
+        case .error: return "خطأ"
+        default: return "غير معروف"
         }
     }
 

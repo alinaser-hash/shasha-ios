@@ -235,3 +235,28 @@ final class GroupOrderRuleTests: XCTestCase {
         XCTAssertEqual(GroupOrderRule.arrange(provider: ["a", "b"], saved: []), ["a", "b"])
     }
 }
+
+final class DiagRuleTests: XCTestCase {
+    func testRedactsLinksAndSecrets() {
+        let s = DiagRule.redact("open http://srv.example:8080/series/ali/pa55/123.mkv failed for ali / pa55", secrets: ["ali", "pa55"])
+        XCTAssertFalse(s.contains("http")); XCTAssertFalse(s.contains("pa55")); XCTAssertFalse(s.contains("ali"))
+        XCTAssertTrue(s.contains("[رابط مخفي]"))
+    }
+    func testShortSecretsIgnored() {
+        XCTAssertEqual(DiagRule.redact("a b", secrets: ["a"]), "a b")
+    }
+    func testFourcc() {
+        XCTAssertEqual(DiagRule.fourcc(0x63766568), "hevc")     // 'h','e','v','c' little-endian
+        XCTAssertEqual(DiagRule.fourcc(0), "غير متاح")
+    }
+    func testProbeLinesOnlyWhatIsThere() {
+        let v: [String: Any] = ["codec_name": "hevc", "profile": "Main 10", "color_transfer": "smpte2084",
+                                "side_data_list": [["side_data_type": "DOVI configuration record", "dv_profile": 5, "dv_bl_signal_compatibility_id": 0]]]
+        let lines = DiagRule.probeLines(video: v, audio: nil)
+        XCTAssertTrue(lines.contains("فيديو ترميز: hevc"))
+        XCTAssertTrue(lines.contains("فيديو color_transfer: smpte2084"))
+        XCTAssertTrue(lines.contains { $0.contains("DOVI") && $0.contains("dv_profile=5") })
+        XCTAssertFalse(lines.contains { $0.contains("color_primaries") })
+        XCTAssertTrue(DiagRule.probeLines(video: nil, audio: nil).isEmpty)
+    }
+}
