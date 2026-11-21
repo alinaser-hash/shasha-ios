@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 70
     env:
       SHASHA_CREDIT: ${{ secrets.SHASHA_CREDIT }}
     steps:
@@ -28,24 +28,32 @@ jobs:
             brew install xcodegen
             xcodegen generate
             pod install --repo-update
-            xcodebuild -workspace ShashaIOS.xcworkspace -scheme ShashaIOS -configuration Release \
-              -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" SHASHA_CREDIT="$SHASHA_CREDIT" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
+            for scheme in ShashaIOS ShashaPiP; do
+              echo "== build $scheme"
+              xcodebuild -workspace ShashaIOS.xcworkspace -scheme $scheme -configuration Release \
+                -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+                CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" SHASHA_CREDIT="$SHASHA_CREDIT" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
+            done
           } 2>&1 | tee all.log
 
       - name: Package IPA
         if: steps.build.outcome == 'success'
         run: |
-          rm -rf Payload && mkdir Payload
-          cp -R build/Build/Products/Release-iphoneos/ShashaIOS.app Payload/
-          zip -qry Shasha-unsigned.ipa Payload
-          ls -la Shasha-unsigned.ipa
+          for app in ShashaIOS ShashaPiP; do
+            rm -rf Payload && mkdir Payload
+            cp -R build/Build/Products/Release-iphoneos/$app.app Payload/
+            out=$([ "$app" = ShashaIOS ] && echo Shasha-unsigned.ipa || echo Shasha-PiP-unsigned.ipa)
+            zip -qry "$out" Payload
+            ls -la "$out"
+          done
 
       - uses: actions/upload-artifact@v4
         if: steps.build.outcome == 'success'
         with:
           name: Shasha-unsigned-ipa
-          path: Shasha-unsigned.ipa
+          path: |
+            Shasha-unsigned.ipa
+            Shasha-PiP-unsigned.ipa
           retention-days: 3
 
       # Short result + errors on the ci-logs branch (read by the developer with git, no API needed).
@@ -54,7 +62,7 @@ jobs:
         run: |
           {
             echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }}"
-            plutil -p build/Build/Products/Release-iphoneos/ShashaIOS.app/Info.plist 2>/dev/null | grep -E "CFBundle(ShortVersionString|Version)\"" || true
+            for app in ShashaIOS ShashaPiP; do echo "$app:"; plutil -p build/Build/Products/Release-iphoneos/$app.app/Info.plist 2>/dev/null | grep -E "CFBundle(ShortVersionString|Version|DisplayName|Identifier)\"" || true; done
             echo "== errors"; grep -E "error:|fatal error|Undefined symbol|ld: |\*\* BUILD|\[!\]|failed \(|Executed [0-9]+ test" all.log | head -200 || true
             echo "== tail"; tail -60 all.log || true
           } > ci-summary.txt

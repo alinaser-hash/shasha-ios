@@ -1,14 +1,25 @@
 import Foundation
+#if VLC4
 import VLCKit
+#else
+import MobileVLCKit
+#endif
 
 /// Keeps the VLC log of the current playback in memory for "Copy playback diagnostics". Nothing is written to disk or sent.
 /// - Default: errors and warnings. "Detailed" adds debug lines, but only those about decoders, subtitles and video output
 ///   (module choice, libass/freetype/subsdec, vout), so the useful lines are not pushed out by noise.
 /// - Repeated messages are folded into one line with a count.
 /// - Cleared when a new item starts, so the report belongs to what is on screen.
-final class DiagLog: NSObject, VLCLogging {
+#if VLC4
+typealias DiagLevel = VLCLogLevel
+#else
+/// VLCKit 3 build: no log hook is used; the type exists so the rest of the code is the same.
+enum DiagLevel: Int { case error, warning, info, debug }
+#endif
+
+final class DiagLog: NSObject {
     static let shared = DiagLog()
-    var level: VLCLogLevel = .warning
+    var level: DiagLevel = .warning
     private let lock = NSLock()
     /// First lines of the playback (module choices, decoders, output) — never pushed out.
     private var head: [String] = []
@@ -29,9 +40,7 @@ final class DiagLog: NSObject, VLCLogging {
         lock.lock(); head.removeAll(); tail.removeAll(); counts.removeAll(); lock.unlock()
     }
 
-    func handleMessage(_ message: String, logLevel level: VLCLogLevel, context: VLCLogContext?) {
-        let module = context?.module ?? "?"
-        let objectType = context?.objectType ?? ""
+    func record(_ message: String, level: DiagLevel, module: String, objectType: String) {
         if level == .debug || level == .info {
             let probe = module + " " + objectType + " " + message
             guard Self.interesting.firstMatch(in: probe, range: NSRange(probe.startIndex..., in: probe)) != nil else { return }
@@ -67,3 +76,11 @@ final class DiagLog: NSObject, VLCLogging {
         return out
     }
 }
+
+#if VLC4
+extension DiagLog: VLCLogging {
+    func handleMessage(_ message: String, logLevel level: VLCLogLevel, context: VLCLogContext?) {
+        record(message, level: level, module: context?.module ?? "?", objectType: context?.objectType ?? "")
+    }
+}
+#endif
