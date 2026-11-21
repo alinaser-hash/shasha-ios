@@ -148,6 +148,11 @@ final class PlayerModel: ObservableObject {
         // arrived late. Dolby Vision profile 5 is flagged from the provider's data instead (see CopyRule.isDolbyVision5).
         if !codecs.isEmpty { m.addOption(":codec=" + (codecs + ["any"]).joined(separator: ",")) }
         if ffmpegDemux { m.addOption(":demux=avformat,any") }
+        if plainDrawable {
+            // Plain view alone may still get "samplebufferdisplay" (VLC 4's default iOS output), so also ask for the OpenGL ES
+            // output by its known names. The log line "using vout display module" shows which output was really used.
+            m.addOption(":vout=gles2,opengles2,gl,opengl,any")
+        }
         if !noAutoTracks, !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
         if !noAutoTracks, !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -917,6 +922,10 @@ struct PlayerScreen: View {
         l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
         l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
         l.append("مختبر: مخرج \(model.plainDrawable ? "عادي بدون PiP" : "PiP (samplebuffer)") | اختيار تلقائي \(model.noAutoTracks ? "متوقف" : "مفعّل") | نص بسيط \(model.plainSubtitles ? "مفعّل" : "متوقف") | FFmpeg \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
+        let mods = DiagLog.shared.moduleChoices()
+        let vout = mods.first(where: { $0.contains("vout display") }) ?? "غير مسجّل في السجل (فعّل التسجيل المفصّل ثم أعد الفتح)"
+        l.append("مخرج الفيديو الفعلي (من سجل VLC): \(vout)")
+        if !mods.isEmpty { l.append("اختيارات VLC للوحدات: " + mods.joined(separator: " ; ")) }
         l.append("المصدر: \(((model.player.media as VLCMedia?)?.url as URL?)?.isFileURL == true ? "ملف محلي (عينة)" : "HTTP")")
         l.append("العنوان: \(title)")
         if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }

@@ -55,6 +55,18 @@ final class DiagLog: NSObject, VLCLogging {
         if tail.count > tailMax { tail.removeFirst(tail.count - tailMax) }
     }
 
+    /// Module choices VLC actually made in this playback ("using vout display module \"…\"" and similar).
+    func moduleChoices() -> [String] {
+        lock.lock(); let all = head + tail; lock.unlock()
+        var out: [String] = []
+        for l in all {
+            guard let r = l.range(of: #"using [a-z ]+ module "[^"]+""#, options: .regularExpression) else { continue }
+            let m = String(l[r])
+            if !out.contains(m) { out.append(m) }
+        }
+        return out
+    }
+
     /// App-side event (track request, open position, lab switch, engine track change) — always kept, time-stamped.
     func note(_ text: String) {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; f.locale = Locale(identifier: "en_US_POSIX")
