@@ -6,6 +6,17 @@ import Libmpv
 // Stage 1: a hand-off player like the Apple one — proves on the device whether mpv shows the files VLCKit can't
 // (Dolby Vision profile 5 colours, embedded ASS subtitles) before the engine replaces VLC in the main player.
 
+/// mpv lab: exactly one factor changed at a time (exclusive choice), kept between launches.
+enum MPVLab: String, CaseIterable {
+    case normal = "عادي (gpu-next + فك عتادي)"
+    case voGPU = "مخرج vo=gpu بدل gpu-next"
+    case noHwdec = "بدون فك عتادي (hwdec=no)"
+    static var current: MPVLab {
+        get { MPVLab(rawValue: UserDefaults.standard.string(forKey: "mpvLab") ?? "") ?? .normal }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "mpvLab") }
+    }
+}
+
 /// One hand-off to mpv.
 struct MPVPlayback: Identifiable {
     let id = UUID()
@@ -72,10 +83,12 @@ final class MPVController: UIViewController {
         mpv_request_log_messages(h, "info")
         var layerPtr = metal
         set("wid", int64Pointer: &layerPtr)
-        set("vo", "gpu-next")
+        let lab = MPVLab.current
+        note("[مرحلة] وضع الاختبار: \(lab.rawValue)")
+        set("vo", lab == .voGPU ? "gpu" : "gpu-next")
         set("gpu-api", "vulkan")
         set("gpu-context", "moltenvk")
-        set("hwdec", "videotoolbox")
+        set("hwdec", lab == .noHwdec ? "no" : "videotoolbox")
         set("video-rotate", "no")
         set("keep-open", "yes")                 // stay on the last frame; the app decides what happens at the end
         set("cache", "yes")
@@ -258,7 +271,7 @@ struct MPVPlayerView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            MPVControllerView(controller: controller).ignoresSafeArea()
+            MPVControllerView(controller: controller).id(ObjectIdentifier(controller)).ignoresSafeArea()
                 .onTapGesture { withAnimation { controls.toggle() } }
             if buffering && !paused { ProgressView().tint(.white).scaleEffect(1.5).allowsHitTesting(false) }
             if controls { overlay.transition(.opacity) }
@@ -338,6 +351,10 @@ struct MPVPlayerView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         if p == "info" {
+                            Text("مختبر mpv — عامل واحد فقط في كل مرة، يعيد الفتح من نفس النقطة").font(.caption.bold()).padding(.horizontal, 12).padding(.top, 8)
+                            ForEach(MPVLab.allCases, id: \.self) { m in
+                                row(m.rawValue, selected: MPVLab.current == m) { reopen(with: m) }
+                            }
                             Text(info).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading).padding(12)
                         } else {
@@ -377,8 +394,10 @@ struct MPVPlayerView: View {
     /// What mpv itself reports: output, decoder, colour description of the video (Dolby Vision shows as colormatrix "dolbyvision").
     private func infoText() -> String {
         func p(_ n: String) -> String { controller.string(n) ?? "غير متاح" }
-        var l = ["المحرّك: mpv \(p("mpv-version")) | FFmpeg \(p("ffmpeg-version"))",
+        var l = ["وضع الاختبار: \(MPVLab.current.rawValue)",
+                 "المحرّك: mpv \(p("mpv-version")) | FFmpeg \(p("ffmpeg-version"))",
                  "مخرج الفيديو: \(p("current-vo")) | gpu-api: vulkan (MoltenVK)",
+                 "الترجمة: sid=\(p("sid")) | sub-visibility=\(p("sub-visibility")) | النص الحالي: \(p("sub-text").isEmpty ? "(فارغ)" : p("sub-text"))",
                  "فك الترميز العتادي: \(p("hwdec-current"))",
                  "ترميز الفيديو: \(p("video-codec")) | \(p("video-params/w"))x\(p("video-params/h")) | \(p("video-params/pixelformat"))",
                  "colormatrix: \(p("video-params/colormatrix")) | gamma: \(p("video-params/gamma")) | primaries: \(p("video-params/primaries")) | sig-peak: \(p("video-params/sig-peak"))",
@@ -386,6 +405,18 @@ struct MPVPlayerView: View {
                  "", "— تحذيرات mpv"]
         l += controller.logLines().suffix(80)
         return DiagRule.redact(l.joined(separator: "\n"), secrets: [])
+    }
+
+    /// Reopen the same file at the current position with another lab mode.
+    private func reopen(with m: MPVLab) {
+        guard m != MPVLab.current else { return }
+        MPVLab.current = m
+        let pos = controller.double("time-pos")
+        controller.shutdown()
+        let fresh = MPVController(MPVPlayback(url: playback.url, title: playback.title, start: pos > 5 ? pos : playback.start))
+        fresh.onEndOfFile = { reason in if reason == "eof" { ended = true; finish() } }
+        controller = fresh
+        panel = nil; time = 0; duration = 0; buffering = true
     }
 
     private func finish() {
