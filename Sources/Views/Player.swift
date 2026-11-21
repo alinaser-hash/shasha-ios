@@ -404,6 +404,7 @@ struct PlayerScreen: View {
     /// Tracks read once when a panel opens (and after each pick), so the list never moves under the finger.
     @State private var panelTracks: [PlayerModel.Track] = []
     @State private var applePlayer: ApplePlayback?
+    @State private var mpvPlayback: MPVPlayback?
 
     enum Panel: String, Identifiable { case audio, subtitles, picture, speed, diag; var id: String { rawValue } }
     @State private var diagText = ""
@@ -477,6 +478,9 @@ struct PlayerScreen: View {
                 DiagLog.shared.note("[التطبيق] إضافة ترجمة من الملفات: \(u.lastPathComponent)")
                 model.addSubtitle(dest); show("أُضيفت: \(u.lastPathComponent)")
             } catch { show(error.localizedDescription) }
+        }
+        .fullScreenCover(item: $mpvPlayback) { m in
+            MPVPlayerView(playback: m) { pos, dur, ended in returnFromMPV(pos, dur, ended) }
         }
         .fullScreenCover(item: $applePlayer) { a in
             ApplePlayerView(playback: a) { pos, dur, failed in returnFromApplePlayer(pos, dur, failed) }
@@ -842,6 +846,7 @@ struct PlayerScreen: View {
             }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             if !isLive {
+                panelRow("فتح بمحرّك mpv (تجريبي)", icon: "bolt.horizontal.circle") { closePanel(); openMPV() }
                 panelHeader("من الإنترنت")
                 panelRow("أفضل ترجمة عربية تلقائيًا", icon: "sparkles") { closePanel(); autoArabicSubtitle() }
                 panelRow("بحث في OpenSubtitles…", icon: "globe") { closePanel(); sheet = .subs }
@@ -860,6 +865,7 @@ struct PlayerScreen: View {
             }
             if !isLive, current != nil {
                 panelHeader("ألوان HDR / Dolby Vision")
+                panelRow("فتح بمحرّك mpv (تجريبي)", icon: "bolt.horizontal.circle") { closePanel(); openMPV() }
                 panelRow("فتح بمشغّل Apple", icon: "apple.logo") { closePanel(); openApplePlayer() }
                 panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
@@ -1015,6 +1021,30 @@ struct PlayerScreen: View {
 
     private func panelNote(_ t: String) -> some View {
         Text(t).font(.caption).foregroundStyle(.white.opacity(0.6)).padding(.horizontal, 12).padding(.vertical, 6)
+    }
+
+    // MARK: mpv hand-off (stage 1 of the engine change)
+
+    private func openMPV() {
+        guard let v = current, let url = URL(string: v.url) else { return }
+        saveResume()
+        let start = Double(model.timeMs) / 1000
+        model.stop()        // one connection per account on many providers
+        DiagLog.shared.note(String(format: "[التطبيق] تسليم إلى mpv عند %.0f ث", start))
+        mpvPlayback = MPVPlayback(url: url, title: v.title, start: start)
+    }
+
+    private func returnFromMPV(_ positionS: Double, _ durationS: Double, _ ended: Bool) {
+        let start = mpvPlayback?.start ?? 0
+        mpvPlayback = nil
+        guard let v = current else { return }
+        if durationS > 0 { Store.setPosition(v.key, positionS, durationS) }
+        if ended || (durationS > 0 && EndRule.isComplete(timeMs: Int32(positionS * 1000), lengthMs: Int32(durationS * 1000))) {
+            Store.setPosition(v.key, 1, 1)
+            if nextUp != nil { playEpisode(index + 1) } else { close() }
+            return
+        }
+        openVod(v, from: positionS > 0 ? positionS : start)
     }
 
     // MARK: Apple player (AVKit): correct Dolby Vision colours, AirPlay, system picture in picture

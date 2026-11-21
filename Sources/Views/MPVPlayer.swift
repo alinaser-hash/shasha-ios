@@ -1,0 +1,381 @@
+import SwiftUI
+import UIKit
+import Libmpv
+
+// mpv engine (MPVKit: libmpv + FFmpeg + libplacebo + libdovi + libass, drawn with Vulkan via MoltenVK on a CAMetalLayer).
+// Stage 1: a hand-off player like the Apple one — proves on the device whether mpv shows the files VLCKit can't
+// (Dolby Vision profile 5 colours, embedded ASS subtitles) before the engine replaces VLC in the main player.
+
+/// One hand-off to mpv.
+struct MPVPlayback: Identifiable {
+    let id = UUID()
+    let url: URL
+    let title: String
+    let start: Double
+}
+
+/// MoltenVK workarounds taken from MPVKit's demo (drawable 1x1 flicker; EDR flag must be set on the main thread).
+final class MPVMetalLayer: CAMetalLayer {
+    override var drawableSize: CGSize {
+        get { super.drawableSize }
+        set { if Int(newValue.width) > 1 && Int(newValue.height) > 1 { super.drawableSize = newValue } }
+    }
+    override var wantsExtendedDynamicRangeContent: Bool {
+        get { super.wantsExtendedDynamicRangeContent }
+        set {
+            if Thread.isMainThread { super.wantsExtendedDynamicRangeContent = newValue }
+            else { DispatchQueue.main.sync { super.wantsExtendedDynamicRangeContent = newValue } }
+        }
+    }
+}
+
+final class MPVController: UIViewController {
+    let metal = MPVMetalLayer()
+    private(set) var mpv: OpaquePointer?
+    private let events = DispatchQueue(label: "app.shasha.mpv.events")
+    private let playback: MPVPlayback
+    /// Warnings/errors from mpv for the info sheet (links removed before display).
+    private(set) var log: [String] = []
+    private let logLock = NSLock()
+    var onEndOfFile: ((_ reason: String) -> Void)?
+
+    init(_ p: MPVPlayback) { playback = p; super.init(nibName: nil, bundle: nil) }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        metal.frame = view.bounds
+        metal.contentsScale = UIScreen.main.nativeScale
+        metal.framebufferOnly = true
+        metal.backgroundColor = UIColor.black.cgColor
+        view.layer.addSublayer(metal)
+        start()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        metal.frame = view.bounds
+    }
+
+    private func start() {
+        guard let h = mpv_create() else { note("mpv_create failed"); return }
+        mpv = h
+        mpv_request_log_messages(h, "warn")
+        var layerPtr = metal
+        set("wid", int64Pointer: &layerPtr)
+        set("vo", "gpu-next")
+        set("gpu-api", "vulkan")
+        set("gpu-context", "moltenvk")
+        set("hwdec", "videotoolbox")
+        set("video-rotate", "no")
+        set("keep-open", "yes")                 // stay on the last frame; the app decides what happens at the end
+        set("cache", "yes")
+        set("demuxer-max-bytes", "150MiB")
+        set("slang", "ar,ara,arabic")
+        set("subs-fallback", "yes")
+        set("sub-font", "Geeza Pro")
+        set("sub-font-size", "46")
+        if playback.start > 5 { set("start", String(format: "%.0f", playback.start)) }
+        let pref = PlayerPrefs.audio
+        if pref.contains("ara") { set("alang", "ar,ara,arabic") } else if pref.contains("eng") { set("alang", "en,eng,english") }
+        check(mpv_initialize(h), "initialize")
+        mpv_set_wakeup_callback(h, { ctx in
+            guard let ctx else { return }
+            Unmanaged<MPVController>.fromOpaque(ctx).takeUnretainedValue().drainEvents()
+        }, Unmanaged.passUnretained(self).toOpaque())
+        command(["loadfile", playback.url.absoluteString, "replace"])
+        NotificationCenter.default.addObserver(self, selector: #selector(background), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(foreground), name: UIApplication.willEnterForegroundNotification, object: nil)
+    }
+
+    // Fix from the demo: the Metal surface is lost in the background; drop video and bring it back.
+    @objc private func background() { setFlag("pause", true); set("vid", "no") }
+    @objc private func foreground() { set("vid", "auto") }
+
+    func shutdown() {
+        NotificationCenter.default.removeObserver(self)
+        guard let h = mpv else { return }
+        mpv = nil
+        mpv_set_wakeup_callback(h, nil, nil)
+        mpv_terminate_destroy(h)
+    }
+
+    deinit { shutdown() }
+
+    // MARK: Small API
+
+    func set(_ name: String, _ value: String) {
+        guard let h = mpv else { return }
+        check(mpv_set_option_string(h, name, value), "option \(name)")
+    }
+    private func set(_ name: String, int64Pointer p: UnsafeMutableRawPointer) {
+        guard let h = mpv else { return }
+        check(mpv_set_option(h, name, MPV_FORMAT_INT64, p), "option \(name)")
+    }
+    func setProperty(_ name: String, _ value: String) {
+        guard let h = mpv else { return }
+        check(mpv_set_property_string(h, name, value), "set \(name)")
+    }
+    func setFlag(_ name: String, _ on: Bool) {
+        guard let h = mpv else { return }
+        var v: Int32 = on ? 1 : 0
+        mpv_set_property(h, name, MPV_FORMAT_FLAG, &v)
+    }
+    func flag(_ name: String) -> Bool {
+        guard let h = mpv else { return false }
+        var v: Int32 = 0
+        mpv_get_property(h, name, MPV_FORMAT_FLAG, &v)
+        return v != 0
+    }
+    func double(_ name: String) -> Double {
+        guard let h = mpv else { return 0 }
+        var v: Double = 0
+        mpv_get_property(h, name, MPV_FORMAT_DOUBLE, &v)
+        return v
+    }
+    func string(_ name: String) -> String? {
+        guard let h = mpv, let c = mpv_get_property_string(h, name) else { return nil }
+        defer { mpv_free(c) }
+        return String(cString: c)
+    }
+    func command(_ args: [String]) {
+        guard let h = mpv else { return }
+        var cargs: [UnsafePointer<CChar>?] = args.map { UnsafePointer(strdup($0)) }
+        cargs.append(nil)
+        defer { cargs.forEach { if let p = $0 { free(UnsafeMutablePointer(mutating: p)) } } }
+        check(mpv_command(h, &cargs), args.first ?? "command")
+    }
+
+    struct Track: Identifiable { let id: String; let name: String; let selected: Bool; let codec: String }
+
+    /// Audio ("audio") or subtitle ("sub") tracks from mpv's track-list.
+    func tracks(_ type: String) -> [Track] {
+        let n = Int(string("track-list/count") ?? "0") ?? 0
+        var out: [Track] = []
+        for i in 0..<n where string("track-list/\(i)/type") == type {
+            let id = string("track-list/\(i)/id") ?? "\(i)"
+            let lang = string("track-list/\(i)/lang") ?? ""
+            let title = string("track-list/\(i)/title") ?? ""
+            let codec = string("track-list/\(i)/codec") ?? "?"
+            let ext = string("track-list/\(i)/external") == "yes" ? " · خارجية" : ""
+            let name = [title, lang.isEmpty ? nil : "[\(lang)]"].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " ")
+            out.append(Track(id: id, name: (name.isEmpty ? "مسار \(id)" : name) + ext,
+                             selected: string("track-list/\(i)/selected") == "yes", codec: codec))
+        }
+        return out
+    }
+
+    // MARK: Events and log
+
+    private func drainEvents() {
+        events.async { [weak self] in
+            guard let self else { return }
+            while let h = self.mpv, let e = mpv_wait_event(h, 0), e.pointee.event_id != MPV_EVENT_NONE {
+                switch e.pointee.event_id {
+                case MPV_EVENT_LOG_MESSAGE:
+                    if let m = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(e.pointee.data))?.pointee,
+                       let p = m.prefix, let l = m.level, let t = m.text {
+                        self.note("[\(String(cString: l))] \(String(cString: p)): \(String(cString: t).trimmingCharacters(in: .newlines))")
+                    }
+                case MPV_EVENT_END_FILE:
+                    let reason: String
+                    if let d = UnsafeMutablePointer<mpv_event_end_file>(OpaquePointer(e.pointee.data))?.pointee {
+                        switch d.reason {
+                        case MPV_END_FILE_REASON_EOF: reason = "eof"
+                        case MPV_END_FILE_REASON_ERROR: reason = "error: " + String(cString: mpv_error_string(d.error))
+                        default: reason = "other"
+                        }
+                    } else { reason = "?" }
+                    self.note("end-file: \(reason)")
+                    DispatchQueue.main.async { self.onEndOfFile?(reason) }
+                case MPV_EVENT_SHUTDOWN:
+                    return
+                default: break
+                }
+            }
+        }
+    }
+
+    private func check(_ status: Int32, _ what: String) {
+        if status < 0 { note("API \(what): \(String(cString: mpv_error_string(status)))") }
+    }
+
+    func note(_ s: String) {
+        logLock.lock(); log.append(s); if log.count > 300 { log.removeFirst(log.count - 300) }; logLock.unlock()
+    }
+
+    func logLines() -> [String] { logLock.lock(); defer { logLock.unlock() }; return log }
+}
+
+struct MPVControllerView: UIViewControllerRepresentable {
+    let controller: MPVController
+    func makeUIViewController(context: Context) -> MPVController { controller }
+    func updateUIViewController(_ c: MPVController, context: Context) {}
+}
+
+/// Minimal controls around the mpv view: play/pause, ±10 s, seek bar, audio/subtitle lists, engine info.
+struct MPVPlayerView: View {
+    let playback: MPVPlayback
+    /// position s, duration s, reached the end
+    let onClose: (Double, Double, Bool) -> Void
+    @State private var controller: MPVController
+    @State private var time: Double = 0
+    @State private var duration: Double = 0
+    @State private var paused = false
+    @State private var buffering = true
+    @State private var controls = true
+    @State private var scrub: Double?
+    @State private var panel: String?          // "audio" / "sub" / "info"
+    @State private var info = ""
+    @State private var ended = false
+    private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    init(playback: MPVPlayback, onClose: @escaping (Double, Double, Bool) -> Void) {
+        self.playback = playback
+        self.onClose = onClose
+        _controller = State(initialValue: MPVController(playback))
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            MPVControllerView(controller: controller).ignoresSafeArea()
+                .onTapGesture { withAnimation { controls.toggle() } }
+            if buffering && !paused { ProgressView().tint(.white).scaleEffect(1.5).allowsHitTesting(false) }
+            if controls { overlay.transition(.opacity) }
+            if let p = panel { panelView(p) }
+        }
+        .environment(\.layoutDirection, .leftToRight)
+        .statusBarHidden(true)
+        .onReceive(tick) { _ in
+            time = controller.double("time-pos")
+            duration = controller.double("duration")
+            paused = controller.flag("pause")
+            buffering = controller.flag("paused-for-cache") || controller.flag("seeking") || time == 0
+        }
+        .onAppear {
+            controller.onEndOfFile = { reason in if reason == "eof" { ended = true; finish() } }
+        }
+    }
+
+    private var overlay: some View {
+        VStack {
+            HStack(spacing: 14) {
+                Button { finish() } label: {
+                    Label("رجوع لمشغّل VLC", systemImage: "chevron.down").font(.callout.bold())
+                        .padding(.horizontal, 12).padding(.vertical, 8).background(.black.opacity(0.55), in: Capsule())
+                }
+                Text(playback.title).font(.headline).lineLimit(1)
+                Spacer()
+                Text("mpv").font(.caption2.bold()).padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Theme.teal, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
+                Button { panel = "audio" } label: { Image(systemName: "waveform").font(.title3).frame(width: 40, height: 40) }
+                Button { panel = "sub" } label: { Image(systemName: "captions.bubble").font(.title3).frame(width: 40, height: 40) }
+                Button { info = infoText(); panel = "info" } label: { Image(systemName: "stethoscope").font(.title3).frame(width: 40, height: 40) }
+            }
+            .padding(.horizontal, 16).padding(.top, 8)
+            Spacer()
+            HStack(spacing: 56) {
+                Button { controller.command(["seek", "-10"]) } label: { Image(systemName: "gobackward.10").font(.system(size: 36)) }
+                Button { controller.setFlag("pause", !paused) } label: {
+                    Image(systemName: paused ? "play.fill" : "pause.fill").font(.system(size: 40))
+                        .frame(width: 84, height: 84).background(.white.opacity(0.18), in: Circle())
+                }
+                Button { controller.command(["seek", "10"]) } label: { Image(systemName: "goforward.10").font(.system(size: 36)) }
+            }
+            Spacer()
+            if duration > 0 {
+                let shown = scrub ?? (time / max(duration, 1))
+                HStack(spacing: 10) {
+                    Text(fmt(shown * duration)).font(.caption.monospacedDigit())
+                    Slider(value: Binding(get: { shown }, set: { scrub = $0 }), in: 0...1, onEditingChanged: { editing in
+                        if !editing, let s = scrub {
+                            controller.command(["seek", String(format: "%.1f", s * duration), "absolute"]); scrub = nil
+                        }
+                    }).tint(Theme.accent)
+                    Text("-" + fmt(max(0, duration - shown * duration))).font(.caption.monospacedDigit())
+                }
+                .padding(.horizontal, 16).padding(.bottom, 12)
+            }
+        }
+        .foregroundStyle(.white)
+        .background(LinearGradient(colors: [.black.opacity(0.65), .clear, .clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea().allowsHitTesting(false))
+    }
+
+    private func panelView(_ p: String) -> some View {
+        HStack(spacing: 0) {
+            Color.black.opacity(0.35).contentShape(Rectangle()).onTapGesture { panel = nil }
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text(p == "audio" ? "الصوت" : p == "sub" ? "الترجمة" : "معلومات المحرّك").font(.headline)
+                    Spacer()
+                    if p == "info" { Button("نسخ") { UIPasteboard.general.string = info } }
+                    Button { panel = nil } label: { Image(systemName: "xmark").frame(width: 40, height: 40) }
+                }
+                .padding(.horizontal, 16).padding(.top, 10)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if p == "info" {
+                            Text(info).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                        } else {
+                            let list = controller.tracks(p)
+                            if p == "sub" { row("بدون ترجمة", selected: !list.contains(where: \.selected)) { controller.setProperty("sid", "no"); panel = nil } }
+                            if list.isEmpty { Text(p == "sub" ? "لا توجد ترجمة" : "لا توجد مسارات").foregroundStyle(.secondary).padding(12) }
+                            ForEach(list) { t in
+                                row("\(t.name)  (\(t.codec))", selected: t.selected) {
+                                    controller.setProperty(p == "sub" ? "sid" : "aid", t.id); panel = nil
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+            }
+            .frame(width: 360).frame(maxHeight: .infinity)
+            .background(.ultraThinMaterial).background(Color.black.opacity(0.55))
+            .environment(\.layoutDirection, .rightToLeft)
+        }
+        .foregroundStyle(.white)
+        .ignoresSafeArea()
+    }
+
+    private func row(_ text: String, selected: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? Theme.accent : .white.opacity(0.35))
+                Text(text).lineLimit(2).multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .padding(12).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// What mpv itself reports: output, decoder, colour description of the video (Dolby Vision shows as colormatrix "dolbyvision").
+    private func infoText() -> String {
+        func p(_ n: String) -> String { controller.string(n) ?? "غير متاح" }
+        var l = ["المحرّك: mpv \(p("mpv-version")) | FFmpeg \(p("ffmpeg-version"))",
+                 "مخرج الفيديو: \(p("current-vo")) | gpu-api: vulkan (MoltenVK)",
+                 "فك الترميز العتادي: \(p("hwdec-current"))",
+                 "ترميز الفيديو: \(p("video-codec")) | \(p("video-params/w"))x\(p("video-params/h")) | \(p("video-params/pixelformat"))",
+                 "colormatrix: \(p("video-params/colormatrix")) | gamma: \(p("video-params/gamma")) | primaries: \(p("video-params/primaries")) | sig-peak: \(p("video-params/sig-peak"))",
+                 "الحاوية: \(p("file-format")) | الترجمة المحددة: \(p("current-tracks/sub/codec")) [\(p("current-tracks/sub/lang"))]",
+                 "", "— تحذيرات mpv"]
+        l += controller.logLines().suffix(80)
+        return DiagRule.redact(l.joined(separator: "\n"), secrets: [])
+    }
+
+    private func finish() {
+        let pos = controller.double("time-pos"), dur = controller.double("duration")
+        controller.shutdown()
+        onClose(pos, dur, ended)
+    }
+
+    private func fmt(_ s: Double) -> String {
+        let t = Int(max(0, s))
+        return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%02d:%02d", t / 60, t % 60)
+    }
+}
