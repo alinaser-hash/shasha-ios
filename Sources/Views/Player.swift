@@ -1095,6 +1095,17 @@ struct PlayerScreen: View {
         show(model.plainSubtitles ? "ترجمة نصية بسيطة — انتظر جملة حوار" : "رجوع لمفكّك الترجمة العادي")
     }
 
+    /// "From the start": reopen without the start-time option. A seek to 0 right after opening is ignored by VLC
+    /// (the stream is still opening at the resume point), so the video stayed where it had stopped.
+    private func restartFromBeginning() {
+        resumeAt = nil
+        resumeTask?.cancel()
+        guard let v = current else { return }
+        openVod(v, from: 0)
+        show("من البداية")
+        scheduleHide()
+    }
+
     private func retryFrom(_ at: Int32) {
         guard let v = current else { return }
         openVod(v, from: Double(at) / 1000)
