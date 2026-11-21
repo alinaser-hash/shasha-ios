@@ -30,7 +30,7 @@ jobs:
             pod install --repo-update
             xcodebuild -workspace ShashaIOS.xcworkspace -scheme ShashaIOS -configuration Release \
               -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" SHASHA_CREDIT="$SHASHA_CREDIT" build
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" SHASHA_CREDIT="$SHASHA_CREDIT" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
           } 2>&1 | tee all.log
 
       - name: Package IPA
@@ -54,6 +54,7 @@ jobs:
         run: |
           {
             echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }}"
+            plutil -p build/Build/Products/Release-iphoneos/ShashaIOS.app/Info.plist 2>/dev/null | grep -E "CFBundle(ShortVersionString|Version)\"" || true
             echo "== errors"; grep -E "error:|fatal error|Undefined symbol|ld: |\*\* BUILD|\[!\]|failed \(|Executed [0-9]+ test" all.log | head -200 || true
             echo "== tail"; tail -60 all.log || true
           } > ci-summary.txt

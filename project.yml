@@ -21,6 +21,9 @@ targets:
       path: Support/Info.plist
       properties:
         CFBundleDisplayName: "شاشة"
+        # Without these XcodeGen writes fixed "1.0" / "1" into Info.plist.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleDevelopmentRegion: ar
         CFBundleLocalizations: [ar, en]
         UILaunchScreen: {}

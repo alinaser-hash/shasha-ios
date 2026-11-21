@@ -34,7 +34,7 @@ struct SettingsView: View {
                 LanguageSettingsSection()
                 SubsSettingsSection()
                 Section("حول التطبيق") {
-                    HStack { Text("الإصدار"); Spacer(); Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") }
+                    HStack { Text("الإصدار"); Spacer(); Text((Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")") }
                     Text(credit).foregroundStyle(Theme.accent).bold()
                     Text("يشغّل قوائمك الخاصة فقط. المشغّل مبني على VLCKit (رخصة LGPL).").font(.footnote).foregroundStyle(.secondary)
                 }
