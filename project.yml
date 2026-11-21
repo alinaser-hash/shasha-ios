@@ -12,7 +12,7 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.8.8"
+    MARKETING_VERSION: "0.8.9"
     CURRENT_PROJECT_VERSION: "8"
 targets:
   ShashaIOS:
@@ -63,6 +63,11 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGNING_ALLOWED: "NO"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/PiP/Shasha-Bridging-Header.h
+        # 0.8.9: MPVKit's static libraries go BEFORE the CocoaPods flags (-framework VLCKit). VLCKit is a dynamic
+        # framework that exports its own libplacebo; with VLCKit first, ld bound part of mpv's libplacebo calls to
+        # VLCKit's copy (device backtrace: pl_tex_create/pl_upload_plane inside "VLCKit", pl_queue_update inside the
+        # app) — two libplacebo versions mixed. CI checks the result with nm (no mpv-library symbol from VLCKit).
+        OTHER_LDFLAGS: "-framework Libmpv -framework Libplacebo -framework Libdovi -framework Libshaderc_combined -framework lcms2 -framework Libavcodec -framework Libavdevice -framework Libavfilter -framework Libavformat -framework Libavutil -framework Libswresample -framework Libswscale -framework Libass -framework Libfreetype -framework Libfribidi -framework Libharfbuzz -framework Libunibreak -framework Libssl -framework Libcrypto -framework gmp -framework nettle -framework hogweed -framework gnutls -framework Libdav1d -framework Libuavs3d -framework Libuchardet -framework Libbluray -lMoltenVK $(inherited)"
         SHASHA_CREDIT: ""
         CODE_SIGNING_REQUIRED: "NO"
         ENABLE_BITCODE: "NO"
