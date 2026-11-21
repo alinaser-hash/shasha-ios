@@ -98,9 +98,12 @@ final class PlayerModel: ObservableObject {
         guard let m = VLCMedia(url: u) else { failed = true; return }
         m.addOption(":network-caching=1500")
         if PlayerPrefs.softwareDecoding {
-            // Some HDR / Dolby Vision files come out green or purple with the hardware decoder.
+            // Dolby Vision mode (experimental). In libVLC 4 Dolby Vision is reshaped by the libplacebo "pl_scale"
+            // OpenGL filter, which needs FFmpeg (avcodec) decoding so the DoVi metadata reaches the output;
+            // the hardware decoder path drops it, giving green/purple pictures.
             m.addOption(":codec=avcodec")
             m.addOption(":avcodec-hw=none")
+            m.addOption(":gl-filters=pl_scale")
         }
         if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
         if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
@@ -736,8 +739,9 @@ struct PlayerScreen: View {
                 panelRow("فتح بمشغّل Apple", icon: "apple.logo") { closePanel(); openApplePlayer() }
                 panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
-            panelHeader("فك الترميز")
-            panelRow(PlayerPrefs.softwareDecoding ? "برمجي (اضغط للرجوع للعتادي)" : "عتادي (اضغط للتجربة البرمجية)", icon: "cpu") { switchDecoder() }
+            panelHeader("وضع Dolby Vision (تجريبي)")
+            panelRow(PlayerPrefs.softwareDecoding ? "مفعّل — اضغط للإيقاف" : "تشغيل وضع Dolby Vision", selected: PlayerPrefs.softwareDecoding, icon: "sparkles.tv") { switchDecoder() }
+            panelNote("يفك الفيديو بـ FFmpeg ويمرّره على مرشّح libplacebo في VLC 4 لتصحيح ألوان Dolby Vision. أثقل على الجوال.")
         case .speed:
             ForEach([Float(0.5), 0.75, 1, 1.25, 1.5, 2], id: \.self) { r in
                 panelRow(rateText(r), selected: model.rate == r) { model.setRate(r); show("السرعة \(rateText(r))") }
@@ -933,7 +937,7 @@ struct PlayerScreen: View {
     private func switchDecoder() {
         UserDefaults.standard.set(!PlayerPrefs.softwareDecoding, forKey: PlayerPrefs.softwareKey)
         if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
-        show(PlayerPrefs.softwareDecoding ? "فك ترميز برمجي" : "فك ترميز عتادي")
+        show(PlayerPrefs.softwareDecoding ? "وضع Dolby Vision مفعّل" : "وضع Dolby Vision متوقف")
     }
 
     /// "From the start": reopen without the start-time option. A seek to 0 right after opening is ignored by VLC

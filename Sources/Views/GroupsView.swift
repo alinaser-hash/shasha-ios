@@ -80,7 +80,7 @@ struct LanguageSettingsSection: View {
     var body: some View {
         Section {
             Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP)
-            Toggle("فك ترميز برمجي (لإصلاح الألوان)", isOn: $software)
+            Toggle("وضع Dolby Vision (تجريبي)", isOn: $software)
         } header: { Text("المشغّل") } footer: {
             Text("صورة داخل صورة: إذا خرجت من التطبيق والفيديو شغّال يكمل في نافذة صغيرة، أو من زر ⧉ في المشغّل.\nفك الترميز البرمجي: يصلّح الألوان الخضراء أو البنفسجية في بعض ملفات HDR / Dolby Vision، لكنه أثقل على البطارية. تقدر تجرّبه لفيديو واحد من قائمة شكل الصورة في المشغّل.")
         }
