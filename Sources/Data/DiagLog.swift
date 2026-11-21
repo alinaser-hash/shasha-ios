@@ -55,6 +55,14 @@ final class DiagLog: NSObject, VLCLogging {
         if tail.count > tailMax { tail.removeFirst(tail.count - tailMax) }
     }
 
+    /// App-side event (track request, open position, lab switch, engine track change) — always kept, time-stamped.
+    func note(_ text: String) {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; f.locale = Locale(identifier: "en_US_POSIX")
+        let line = "[\(f.string(from: Date()))] \(text)"
+        lock.lock(); defer { lock.unlock() }
+        if head.count < headMax { head.append(line) } else { tail.append(line); if tail.count > tailMax { tail.removeFirst(tail.count - tailMax) } }
+    }
+
     /// Start of the playback, a count of the frequent messages, then the latest lines.
     func report() -> [String] {
         lock.lock(); defer { lock.unlock() }

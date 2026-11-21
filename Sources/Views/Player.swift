@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import VLCKit
 import MediaPlayer
+import UniformTypeIdentifiers
 
 /// What to play: a live channel inside its list (switch channels) or a film/episode inside its queue.
 enum PlayItem: Identifiable {
@@ -43,8 +44,18 @@ final class PlayerModel: ObservableObject {
 
     init() {
         videoView.backgroundColor = .black
+        plainView.backgroundColor = .black
         videoView.player = player
         player.drawable = videoView
+        // Every engine-side track change, with its time, goes to the diagnostics log.
+        trackObserver.onTrackSelected = { [weak self] type, sel, unsel in
+            let t = self.map { Double($0.player.time.intValue) / 1000 } ?? 0
+            DiagLog.shared.note(String(format: "[المحرّك] تغيير مسار %@: اختير %@، أُلغي %@ (عند %.1f ث)", type, sel ?? "لا شيء", unsel ?? "لا شيء", t))
+        }
+        trackObserver.onTrackAdded = { type, id in
+            if type == "text" { DiagLog.shared.note("[المحرّك] أُضيف مسار ترجمة \(id ?? "?")") }
+        }
+        player.delegate = trackObserver
         videoView.onPlay = { [weak self] in self?.command(.play) }
         videoView.onPause = { [weak self] in self?.command(.pause) }
         videoView.onReady = { [weak self] c in
@@ -90,6 +101,28 @@ final class PlayerModel: ObservableObject {
     var plainSubtitles = false
     /// Test switch: read the file with FFmpeg's demuxer instead of VLC's own MKV demuxer.
     var ffmpegDemux = false
+    /// Lab: draw into a plain UIView (no picture-in-picture protocols) to see if the PiP output path matters.
+    var plainDrawable = false
+    /// Lab: no automatic track choice (no preferred languages, no re-selection after reopen).
+    var noAutoTracks = false
+    /// Plain drawable for the lab, and the SwiftUI host both views live in.
+    let plainView = UIView()
+    weak var hostView: UIView?
+    private let trackObserver = ShashaTrackObserver()
+
+    /// Puts the chosen drawable in the host and hands it to VLC. Called before each open.
+    func attachDrawable() {
+        let v: UIView = plainDrawable ? plainView : videoView
+        let other: UIView = plainDrawable ? videoView : plainView
+        other.removeFromSuperview()
+        if let host = hostView, v.superview !== host {
+            v.frame = host.bounds
+            v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            host.addSubview(v)
+        }
+        player.drawable = v
+        if plainDrawable { pipReady = false }
+    }
     /// Subtitle track to re-select after a reopen (VLC track id).
     var pendingSubtitleId: String?
     private var stall = StallDetector()
@@ -115,9 +148,13 @@ final class PlayerModel: ObservableObject {
         // arrived late. Dolby Vision profile 5 is flagged from the provider's data instead (see CopyRule.isDolbyVision5).
         if !codecs.isEmpty { m.addOption(":codec=" + (codecs + ["any"]).joined(separator: ",")) }
         if ffmpegDemux { m.addOption(":demux=avformat,any") }
-        if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
-        if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
+        if !noAutoTracks, !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
+        if !noAutoTracks, !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
+        attachDrawable()
+        DiagLog.shared.note(String(format: "[فتح] %@ | بداية من %.0f ث | مخرج: %@ | اختيار تلقائي: %@ | نص بسيط: %@ | FFmpeg: %@",
+                                   u.isFileURL ? "ملف محلي" : "HTTP", startSeconds, plainDrawable ? "عادي بدون PiP" : "PiP",
+                                   noAutoTracks ? "متوقف" : "مفعّل", plainSubtitles ? "نعم" : "لا", ffmpegDemux ? "نعم" : "لا"))
         player.media = m
         player.play()
         if rate != 1 { player.rate = rate }
@@ -142,6 +179,7 @@ final class PlayerModel: ObservableObject {
             endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs)
         }
         buffering = !failed && endDecision == nil && stalled
+        if noAutoTracks { pendingSubtitleId = nil }
         if let want = pendingSubtitleId, player.textTracks.contains(where: { $0.trackId == want }) {
             pendingSubtitleId = nil
             selectSubtitle(want)
@@ -240,6 +278,7 @@ final class PlayerModel: ObservableObject {
             lastPick = "\(kind): المسار \(id) غير موجود في قائمة المحرّك الحالية"
             return false
         }
+        DiagLog.shared.note("[التطبيق] طلب اختيار \(kind) \(t.trackId) «\(t.trackName)»")
         t.isSelectedExclusively = true
         lastPick = "\(kind): طُلب اختيار \(t.trackId) «\(t.trackName)» (\(t.codecName()))"
         let all = list
@@ -250,7 +289,7 @@ final class PlayerModel: ObservableObject {
         return true
     }
 
-    func subtitlesOff() { player.deselectAllTextTracks(); lastPick = "ترجمة: إيقاف كل المسارات" }
+    func subtitlesOff() { DiagLog.shared.note("[التطبيق] إيقاف كل الترجمات"); player.deselectAllTextTracks(); lastPick = "ترجمة: إيقاف كل المسارات" }
 
     /// Everything VLC exposes about one track; "غير متاح" where it exposes nothing.
     static func describe(_ t: VLCMediaPlayer.Track) -> String {
@@ -315,10 +354,8 @@ struct VLCView: UIViewRepresentable {
     let model: PlayerModel
     func makeUIView(context: Context) -> UIView {
         let host = UIView(); host.backgroundColor = .black
-        let v = model.videoView
-        v.frame = host.bounds
-        v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        host.addSubview(v)
+        model.hostView = host
+        model.attachDrawable()
         return host
     }
     func updateUIView(_ uiView: UIView, context: Context) {}
@@ -365,6 +402,8 @@ struct PlayerScreen: View {
 
     enum Panel: String, Identifiable { case audio, subtitles, picture, speed, diag; var id: String { rawValue } }
     @State private var diagText = ""
+    @ObservedObject private var samples = SampleStore.shared
+    @State private var pickingSubtitle = false
     @State private var diagDetailed = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -422,6 +461,18 @@ struct PlayerScreen: View {
         }
         .statusBarHidden(!minimized)
         .persistentSystemOverlays(minimized ? .automatic : .hidden)
+        .fileImporter(isPresented: $pickingSubtitle, allowedContentTypes: [.item], allowsMultipleSelection: false) { r in
+            guard case .success(let urls) = r, let u = urls.first else { return }
+            let ok = u.startAccessingSecurityScopedResource()
+            defer { if ok { u.stopAccessingSecurityScopedResource() } }
+            let dest = FileManager.default.temporaryDirectory.appendingPathComponent(u.lastPathComponent)
+            try? FileManager.default.removeItem(at: dest)
+            do {
+                try FileManager.default.copyItem(at: u, to: dest)
+                DiagLog.shared.note("[التطبيق] إضافة ترجمة من الملفات: \(u.lastPathComponent)")
+                model.addSubtitle(dest); show("أُضيفت: \(u.lastPathComponent)")
+            } catch { show(error.localizedDescription) }
+        }
         .fullScreenCover(item: $applePlayer) { a in
             ApplePlayerView(playback: a) { pos, dur, failed in returnFromApplePlayer(pos, dur, failed) }
         }
@@ -826,6 +877,28 @@ struct PlayerScreen: View {
                 DiagLog.shared.level = diagDetailed ? .debug : .warning
                 show(diagDetailed ? "فعّل الترجمة الآن ثم ارجع وانسخ" : "رجع التسجيل للأخطاء فقط")
             }
+            panelHeader("مختبر الترجمة — عامل واحد في كل مرة")
+            panelRow(model.plainDrawable ? "مخرج عادي بدون PiP: مفعّل" : "مخرج عادي بدون PiP", selected: model.plainDrawable, icon: "rectangle") {
+                labToggle { model.plainDrawable.toggle() }
+            }
+            panelRow(model.noAutoTracks ? "بدون اختيار تلقائي للمسارات: مفعّل" : "بدون اختيار تلقائي للمسارات", selected: model.noAutoTracks, icon: "hand.raised") {
+                labToggle { model.noAutoTracks.toggle() }
+            }
+            panelRow("من بداية الحلقة (بدون استكمال)", icon: "backward.end") { closePanel(); restartFromBeginning() }
+            if let v = current, !v.url.hasPrefix("file:") {
+                if let p = samples.progress {
+                    panelNote(String(format: "تنزيل العينة… %.0f%%", p * 100))
+                } else {
+                    panelRow("تنزيل عينة 40MB (للمقارنة المحلية)", icon: "arrow.down.circle") { downloadSample(40) }
+                    panelRow("تنزيل عينة 150MB", icon: "arrow.down.circle") { downloadSample(150) }
+                }
+            }
+            if let f = samples.lastFile {
+                panelRow("تشغيل العينة المحلية: \(f.lastPathComponent)", icon: "internaldrive") { playLocalSample(f) }
+            }
+            if let e = samples.error { panelNote("تنزيل العينة: " + e) }
+            panelRow("تحميل ترجمة من ملفات الجهاز (ASS/SRT)", icon: "folder") { pickingSubtitle = true }
+            panelNote("العينات في تطبيق «الملفات» ← على الـiPhone ← شاشة ← Samples.")
             Text(diagText).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                 .environment(\.layoutDirection, .leftToRight)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
@@ -843,7 +916,8 @@ struct PlayerScreen: View {
         l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
         l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
         l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
-        l.append("ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف") | قراءة FFmpeg: \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
+        l.append("مختبر: مخرج \(model.plainDrawable ? "عادي بدون PiP" : "PiP (samplebuffer)") | اختيار تلقائي \(model.noAutoTracks ? "متوقف" : "مفعّل") | نص بسيط \(model.plainSubtitles ? "مفعّل" : "متوقف") | FFmpeg \(model.ffmpegDemux ? "مفعّل" : "متوقف")")
+        l.append("المصدر: \(((model.player.media as VLCMedia?)?.url as URL?)?.isFileURL == true ? "ملف محلي (عينة)" : "HTTP")")
         l.append("العنوان: \(title)")
         if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
         l.append("حالة المحرّك: \(stateName(model.player.state)) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
@@ -1085,6 +1159,33 @@ struct PlayerScreen: View {
         if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
         closePanel()
         show(model.ffmpegDemux ? "قراءة بـ FFmpeg — انتظر جملة حوار" : "رجوع لقارئ VLC")
+    }
+
+    /// One lab factor changed → reopen at the same point with the same subtitle (unless auto choice is off).
+    private func labToggle(_ change: () -> Void) {
+        let keep = model.subtitleTracks.first(where: \.selected)?.id
+        // Lab runs keep the detailed log so the output module and decoder choices are visible.
+        diagDetailed = true; DiagLog.shared.level = .debug
+        change()
+        model.pendingSubtitleId = model.noAutoTracks ? nil : keep
+        if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
+        diagText = diagnostics()
+    }
+
+    private func downloadSample(_ mb: Int) {
+        guard let v = current, let u = URL(string: v.url) else { return }
+        SampleStore.shared.download(u, title: v.title, ext: v.container ?? "mkv", megabytes: mb)
+    }
+
+    /// Same title from the local sample: only the source (network → local file) changes.
+    private func playLocalSample(_ f: URL) {
+        guard let v = current else { return }
+        let local = VodPlay(title: v.title + " (عينة محلية)", url: f.absoluteString, key: "sample:" + v.key, query: v.query,
+                            season: v.season, number: v.number, probe: v.probe, container: v.container)
+        saveResume()
+        openVod(local, from: 0)
+        closePanel()
+        show("تشغيل العينة المحلية")
     }
 
     /// A/B test for "selected but not drawn": reopen with the plain text subtitle decoder and the same track.
