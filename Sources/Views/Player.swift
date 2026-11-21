@@ -1258,6 +1258,15 @@ struct PlayerScreen: View {
         }
         l.append("…")
         l.append(contentsOf: lines.suffix(80))
+        // The session before this one: after a crash, reopening starts a new session, so the crashed one is here.
+        if let prev = MPVSessionFile.beforeCurrent() {
+            let pl = prev.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+            l.append("")
+            l.append("— الجلسة السابقة (\(pl.count) سطر) | آخر سطر: \(pl.last ?? "-")")
+            l.append(contentsOf: pl.filter { $0.contains("[مرحلة]") || $0.contains("[error]") || $0.contains("[fatal]") || $0.contains("end-file") }.suffix(60))
+            l.append("آخر 25 سطر:")
+            l.append(contentsOf: pl.suffix(25))
+        }
         var secrets: [String] = []
         if let x = library.xtream {
             secrets += [x.user, x.pass]

@@ -485,10 +485,18 @@ enum MPVSessionFile {
         ([u.host, u.user, u.password].compactMap { $0 } + u.pathComponents).filter { $0.count >= 3 && $0 != "movie" && $0 != "series" }
     }
 
+    /// The session before the current one (kept so a crash log survives the next open, 0.9.4).
+    static var previousURL: URL { url.deletingLastPathComponent().appendingPathComponent("mpv-prev-session.log") }
+
     static func begin(secrets s: [String]) {
         lock.lock(); defer { lock.unlock() }
         try? handle?.close()
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            try? fm.removeItem(at: previousURL)
+            try? fm.moveItem(at: url, to: previousURL)
+        }
+        fm.createFile(atPath: url.path, contents: nil)
         handle = try? FileHandle(forWritingTo: url)
         lines = 0
         secrets = s
@@ -501,6 +509,12 @@ enum MPVSessionFile {
         let stamp = String(format: "%.3f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))
         let clean = DiagRule.redact(line, secrets: secrets)
         if let d = "\(stamp) \(clean)\n".data(using: .utf8) { h.write(d); try? h.synchronize() }
+    }
+
+    /// Text of the session before the current one.
+    static func beforeCurrent() -> String? {
+        guard let d = try? Data(contentsOf: previousURL), !d.isEmpty else { return nil }
+        return String(decoding: d, as: UTF8.self)
     }
 
     /// Text of the previous session (or nil if there is none).

@@ -309,6 +309,8 @@ extension MPVCore {
         guard mpv != nil else { return }
         pipOutput = on
         pipOutputReady = false; pipOutputFailed = false
+        // Detailed log while the output switches, so a failure here is visible in the session file.
+        if let h = mpv { mpv_request_log_messages(h, on ? "v" : "info") }
         if on {
             let ptr = Int(bitPattern: Unmanaged.passUnretained(pipLayer).toOpaque())
             note("[مرحلة] صورة داخل صورة: تحويل المخرج إلى avfoundation")
