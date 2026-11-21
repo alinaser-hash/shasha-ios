@@ -34,7 +34,7 @@ struct SubResult: Identifiable, Hashable {
 enum OnlineSubs {
     static let keyAPI = "os.apikey", keyUser = "os.user", keyPass = "os.pass"
     private static let base = URL(string: "https://api.opensubtitles.com/api/v1/")!
-    private static let agent = "Shasha v0.4.1"
+    private static let agent = "Shasha v0.5"
     private static var token: String?
 
     enum Failure: LocalizedError {

@@ -7,8 +7,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.4.2"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "0.5.0"
+    CURRENT_PROJECT_VERSION: "7"
 targets:
   ShashaIOS:
     type: application
@@ -25,6 +25,7 @@ targets:
         CFBundleLocalizations: [ar, en]
         UILaunchScreen: {}
         ShashaCredit: "$(SHASHA_CREDIT)"
+        NSFaceIDUsageDescription: "لفتح المجموعات التي قفلتها في شاشة."
         UIApplicationSupportsIndirectInputEvents: true
         UIRequiresFullScreen: false
         UIBackgroundModes: [audio]

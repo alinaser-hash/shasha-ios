@@ -8,6 +8,7 @@ struct SettingsView: View {
     }
     @EnvironmentObject var library: Library
     @State private var adding = false
+    @State private var groupsOpen = false
 
     var body: some View {
         NavigationStack {
@@ -29,6 +30,8 @@ struct SettingsView: View {
                     Button { adding = true } label: { Label("إضافة قائمة", systemImage: "plus") }
                     Button { Task { await library.reload() } } label: { Label("تحديث القائمة الآن", systemImage: "arrow.clockwise") }
                 }
+                GroupsSettingsSection(open: $groupsOpen)
+                LanguageSettingsSection()
                 SubsSettingsSection()
                 Section("حول التطبيق") {
                     HStack { Text("الإصدار"); Spacer(); Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") }
@@ -37,6 +40,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("الإعدادات")
+            .navigationDestination(isPresented: $groupsOpen) { GroupsManagerView() }
             .sheet(isPresented: $adding) { NavigationStack { SetupView() } }
         }
     }

@@ -223,3 +223,15 @@ final class SessionAndDelayedTests: XCTestCase {
         XCTAssertFalse(r); XCTAssertFalse(ran.on)
     }
 }
+
+final class GroupOrderRuleTests: XCTestCase {
+    func testSavedOrderThenNewGroups() {
+        XCTAssertEqual(GroupOrderRule.arrange(provider: ["a", "b", "c", "d"], saved: ["c", "a"]), ["c", "a", "b", "d"])
+    }
+    func testRemovedAndDuplicateIdsIgnored() {
+        XCTAssertEqual(GroupOrderRule.arrange(provider: ["a", "b"], saved: ["x", "b", "b", "a"]), ["b", "a"])
+    }
+    func testNoSavedOrderKeepsProvider() {
+        XCTAssertEqual(GroupOrderRule.arrange(provider: ["a", "b"], saved: []), ["a", "b"])
+    }
+}

@@ -14,6 +14,10 @@ final class Library: ObservableObject {
     @Published private(set) var shows: [Show] = []
     @Published private(set) var loading = false
     @Published var error: String?
+    /// Bumped when group order / hidden / locked change, so screens refresh.
+    @Published private(set) var groupsTick = 0
+    /// Locked groups stay open until this time after Face ID / passcode.
+    @Published private(set) var unlockedUntil: Date?
 
     private let key = "sources.v1"
 
@@ -94,6 +98,85 @@ final class Library: ObservableObject {
     }
 
     private func clear() { liveCats = []; channels = []; vodCats = []; movies = []; seriesCats = []; shows = [] }
+
+    // MARK: Groups: order, hide, lock (per playlist, on this phone)
+
+    func providerCats(_ s: GroupSection) -> [Category] {
+        switch s { case .live: return liveCats; case .movies: return vodCats; case .series: return seriesCats }
+    }
+
+    private func gkey(_ s: GroupSection, _ what: String) -> String { "grp.\(active?.id.uuidString ?? "-").\(s.rawValue).\(what)" }
+    private func set(_ s: GroupSection, _ what: String) -> Set<String> { Set(UserDefaults.standard.stringArray(forKey: gkey(s, what)) ?? []) }
+
+    func isHidden(_ id: String, _ s: GroupSection) -> Bool { set(s, "hidden").contains(id) }
+    func isLocked(_ id: String, _ s: GroupSection) -> Bool { set(s, "locked").contains(id) }
+    var hasLocks: Bool { GroupSection.allCases.contains { !set($0, "locked").isEmpty } }
+    var isUnlocked: Bool { (unlockedUntil ?? .distantPast) > Date() }
+
+    /// All groups in the viewer's order (hidden ones included) — for the manager.
+    func orderedCats(_ s: GroupSection) -> [Category] {
+        GroupOrder.arrange(providerCats(s), order: UserDefaults.standard.stringArray(forKey: gkey(s, "order")) ?? [])
+    }
+
+    /// Groups shown on the screens: viewer's order, hidden removed.
+    func cats(_ s: GroupSection) -> [Category] {
+        let h = set(s, "hidden")
+        return orderedCats(s).filter { !h.contains($0.id) }
+    }
+
+    /// Items of this group may be listed (not hidden; locked only while unlocked).
+    func allowed(_ categoryId: String, _ s: GroupSection) -> Bool {
+        if set(s, "hidden").contains(categoryId) { return false }
+        return isUnlocked || !set(s, "locked").contains(categoryId)
+    }
+
+    /// Fast filter for big lists (one read of the settings per call).
+    func allowedFilter(_ s: GroupSection) -> (String) -> Bool {
+        let blocked = set(s, "hidden").union(isUnlocked ? [] : set(s, "locked"))
+        return { !blocked.contains($0) }
+    }
+
+    func moveGroups(_ s: GroupSection, from: IndexSet, to: Int) {
+        var ids = orderedCats(s).map(\.id)
+        ids.move(fromOffsets: from, toOffset: to)
+        UserDefaults.standard.set(ids, forKey: gkey(s, "order")); groupsTick += 1
+    }
+
+    func toggle(_ what: String, _ id: String, _ s: GroupSection) {
+        var v = set(s, what)
+        if v.contains(id) { v.remove(id) } else { v.insert(id) }
+        UserDefaults.standard.set(Array(v), forKey: gkey(s, what)); groupsTick += 1
+    }
+
+    func resetGroups(_ s: GroupSection) {
+        for w in ["order", "hidden", "locked"] { UserDefaults.standard.removeObject(forKey: gkey(s, w)) }
+        groupsTick += 1
+    }
+
+    /// Face ID / Touch ID / device passcode — the phone's own lock, no separate PIN to remember.
+    func unlock(reason: String = "فتح المجموعات المقفلة") async -> Bool {
+        if isUnlocked { return true }
+        let ok = await DeviceAuth.check(reason)
+        if ok { unlockedUntil = Date().addingTimeInterval(15 * 60); groupsTick += 1 }
+        return ok
+    }
+
+    func lockNow() { unlockedUntil = nil; groupsTick += 1 }
+}
+
+enum GroupSection: String, CaseIterable, Identifiable {
+    case live, movies, series
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .live: return "القنوات"; case .movies: return "الأفلام"; case .series: return "المسلسلات" }
+    }
+}
+
+enum GroupOrder {
+    static func arrange(_ cats: [Category], order: [String]) -> [Category] {
+        let byId = Dictionary(cats.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return GroupOrderRule.arrange(provider: cats.map(\.id), saved: order).compactMap { byId[$0] }
+    }
 }
 
 /// Now-playing programme per channel, fetched lazily for the rows on screen (Xtream only).
@@ -143,4 +226,13 @@ enum Store {
     }
 
     static var favorites: [String] { d.stringArray(forKey: "fav") ?? [] }
+
+    /// Episode key → series id, so "Continue watching" can open the right series.
+    static func remember(episodes keys: [String], show: String) {
+        var m = d.dictionary(forKey: "epshow") as? [String: String] ?? [:]
+        for k in keys { m[k] = show }
+        if m.count > 5000 { m = m.filter { Store.recent.contains($0.key) } }
+        d.set(m, forKey: "epshow")
+    }
+    static func show(forEpisode key: String) -> String? { (d.dictionary(forKey: "epshow") as? [String: String])?[key] }
 }

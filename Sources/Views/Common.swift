@@ -32,6 +32,20 @@ struct PosterCard: View {
     }
 }
 
+/// Horizontal row with a title (Home screen).
+struct Shelf<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.title3.bold()).padding(.horizontal)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 12) { content }.padding(.horizontal)
+            }
+        }
+    }
+}
+
 struct LoadingOrError: View {
     @EnvironmentObject var library: Library
     var body: some View {
@@ -49,11 +63,12 @@ struct LoadingOrError: View {
 struct Chips: View {
     let cats: [Category]
     @Binding var selected: String?
+    var locked: Set<String> = []
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack {
                 chip("الكل", nil)
-                ForEach(cats) { chip($0.name, $0.id) }
+                ForEach(cats) { chip(locked.contains($0.id) ? "🔒 " + $0.name : $0.name, $0.id) }
             }.padding(.horizontal)
         }
     }

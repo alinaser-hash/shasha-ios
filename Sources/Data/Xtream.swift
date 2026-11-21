@@ -65,7 +65,9 @@ struct Xtream {
         let raw = list(try await api("get_live_streams"))
         return raw.compactMap { d in
             guard let id = J.s(d["stream_id"]) else { return nil }
-            return Channel(id: id, name: J.s(d["name"]) ?? "—", logo: J.s(d["stream_icon"]), categoryId: J.s(d["category_id"]) ?? "", url: liveURL(id))
+            let days = J.i(d["tv_archive"]) == 1 ? max(1, J.i(d["tv_archive_duration"])) : 0
+            return Channel(id: id, name: J.s(d["name"]) ?? "—", logo: J.s(d["stream_icon"]), categoryId: J.s(d["category_id"]) ?? "", url: liveURL(id),
+                           archiveDays: days)
         }
     }
 
@@ -126,7 +128,35 @@ struct Xtream {
         guard let d = try? await api("get_vod_info", ["vod_id": id]) as? [String: Any], let info = d["info"] as? [String: Any] else { return MovieInfo() }
         let backdrop = (info["backdrop_path"] as? [Any])?.first.flatMap { J.s($0) } ?? J.s(info["backdrop_path"])
         return MovieInfo(plot: J.s(info["plot"]) ?? J.s(info["description"]), genre: J.s(info["genre"]), year: J.s(info["releasedate"]).map { String($0.prefix(4)) },
-                         duration: J.s(info["duration"]), backdrop: backdrop)
+                         duration: J.s(info["duration"]), backdrop: backdrop,
+                         trailer: J.s(info["youtube_trailer"]) ?? J.s(info["trailer"]))
+    }
+
+    /// Full guide of one channel (get_simple_data_table). Titles/descriptions are base64 on most servers.
+    func schedule(_ streamId: String) async -> [Programme] {
+        guard let d = try? await api("get_simple_data_table", ["stream_id": streamId]) as? [String: Any],
+              let rows = d["epg_listings"] as? [[String: Any]] else { return [] }
+        return rows.compactMap { e -> Programme? in
+            let st = J.i(e["start_timestamp"]), en = J.i(e["stop_timestamp"])
+            guard st > 0, en > st else { return nil }
+            return Programme(title: Self.b64(e["title"]), detail: Self.b64(e["description"]).nilIfEmpty,
+                             start: Date(timeIntervalSince1970: TimeInterval(st)), end: Date(timeIntervalSince1970: TimeInterval(en)),
+                             serverStart: J.s(e["start"]), hasArchive: J.i(e["has_archive"]) == 1)
+        }
+        .sorted { $0.start < $1.start }
+    }
+
+    static func b64(_ v: Any?) -> String {
+        let raw = J.s(v) ?? ""
+        if let data = Data(base64Encoded: raw), let t = String(data: data, encoding: .utf8), !t.isEmpty { return t }
+        return raw
+    }
+
+    /// Catch-up link: /timeshift/user/pass/<minutes>/<yyyy-MM-dd:HH-mm>/<stream>.ts (start in server time).
+    func catchupURL(_ streamId: String, _ p: Programme) -> String? {
+        guard let s = p.serverStart, s.count >= 16 else { return nil }
+        let date = String(s.prefix(10)), time = String(s.dropFirst(11).prefix(5)).replacingOccurrences(of: ":", with: "-")
+        return "\(server)/timeshift/\(esc(user))/\(esc(pass))/\(p.minutes)/\(date):\(time)/\(streamId).ts"
     }
 }
 

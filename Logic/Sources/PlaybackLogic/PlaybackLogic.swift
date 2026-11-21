@@ -194,3 +194,17 @@ enum Delayed {
         return true
     }
 }
+
+// MARK: - Group order
+
+enum GroupOrderRule {
+    /// Viewer's saved order first (ids that still exist, no duplicates), then new provider groups in provider order.
+    static func arrange(provider: [String], saved: [String]) -> [String] {
+        let exists = Set(provider)
+        var seen = Set<String>()
+        var out: [String] = []
+        for id in saved where exists.contains(id) && seen.insert(id).inserted { out.append(id) }
+        for id in provider where seen.insert(id).inserted { out.append(id) }
+        return out
+    }
+}

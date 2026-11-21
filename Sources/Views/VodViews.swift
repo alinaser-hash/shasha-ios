@@ -16,7 +16,9 @@ struct MoviesView: View {
         NavigationStack {
             ScrollView {
                 LoadingOrError()
-                let cont = library.movies.filter { Store.position("movie:" + $0.id) != nil }
+                let _ = library.groupsTick
+                let ok = library.allowedFilter(.movies)
+                let cont = library.movies.filter { ok($0.categoryId) && Store.position("movie:" + $0.id) != nil }
                 if !cont.isEmpty && query.isEmpty && cat == nil {
                     Text("متابعة المشاهدة").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -28,9 +30,9 @@ struct MoviesView: View {
                         }.padding(.horizontal)
                     }
                 }
-                Chips(cats: library.vodCats, selected: $cat).padding(.vertical, 6)
+                Chips(cats: library.cats(.movies), selected: guarded($cat, .movies, library), locked: lockedSet(.movies, library)).padding(.vertical, 6)
                 let _ = tick
-                let list = sortedMovies(library.movies.filter { (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
+                let list = sortedMovies(library.movies.filter { ok($0.categoryId) && (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
                     && (!mine || Store.isFavorite("movie:" + $0.id)) })
                 if mine && list.isEmpty { Text("قائمتك فارغة — افتح فيلمًا واضغط ☆ لإضافته.").foregroundStyle(.secondary).padding() }
                 LazyVGrid(columns: grid, spacing: 16) {
@@ -85,6 +87,19 @@ struct FavButton: View {
     }
 }
 
+/// Chip selection that asks for Face ID / passcode before opening a locked group.
+@MainActor func guarded(_ b: Binding<String?>, _ s: GroupSection, _ library: Library) -> Binding<String?> {
+    Binding(get: { b.wrappedValue }, set: { id in
+        if let id, library.isLocked(id, s), !library.isUnlocked {
+            Task { if await library.unlock() { b.wrappedValue = id } }
+        } else { b.wrappedValue = id }
+    })
+}
+
+@MainActor func lockedSet(_ s: GroupSection, _ library: Library) -> Set<String> {
+    Set(library.cats(s).map(\.id).filter { library.isLocked($0, s) && !library.isUnlocked })
+}
+
 func progress(_ key: String) -> Double? {
     guard let p = Store.position(key), p.dur > 0 else { return nil }
     return min(1, p.pos / p.dur)
@@ -95,6 +110,7 @@ struct MovieDetail: View {
     let movie: Movie
     @Binding var play: PlayItem?
     @State private var info = MovieInfo()
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ScrollView {
@@ -110,6 +126,10 @@ struct MovieDetail: View {
                 } label: {
                     Label(Store.position(key) != nil ? "استكمال" : "تشغيل", systemImage: "play.fill").frame(maxWidth: .infinity).padding(.vertical, 6)
                 }.buttonStyle(.borderedProminent).padding(.horizontal)
+                if let t = info.trailerURL {
+                    Button { openURL(t) } label: { Label("الإعلان", systemImage: "play.rectangle").frame(maxWidth: .infinity).padding(.vertical, 4) }
+                        .buttonStyle(.bordered).padding(.horizontal)
+                }
                 if let p = info.plot { Text(p).padding(.horizontal) }
             }
         }
@@ -133,9 +153,11 @@ struct SeriesView: View {
         NavigationStack {
             ScrollView {
                 LoadingOrError()
-                Chips(cats: library.seriesCats, selected: $cat).padding(.vertical, 6)
+                let _ = library.groupsTick
+                let ok = library.allowedFilter(.series)
+                Chips(cats: library.cats(.series), selected: guarded($cat, .series, library), locked: lockedSet(.series, library)).padding(.vertical, 6)
                 let _ = tick
-                let list = sortedShows(library.shows.filter { (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
+                let list = sortedShows(library.shows.filter { ok($0.categoryId) && (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
                     && (!mine || Store.isFavorite("show:" + $0.id)) })
                 if mine && list.isEmpty { Text("قائمتك فارغة — افتح مسلسلًا واضغط ☆ لإضافته.").foregroundStyle(.secondary).padding() }
                 LazyVGrid(columns: grid, spacing: 16) {
@@ -230,6 +252,7 @@ struct SeriesDetail: View {
             VodPlay(title: "\(show.name) · م\(ep.season) ح\(ep.number)", url: x.episodeURL(ep.id, ep.ext), key: key(ep),
                     query: SubQuery(name: base, season: ep.season, episode: ep.number), season: ep.season, number: ep.number)
         }
+        Store.remember(episodes: queue.map(\.key), show: show.id)
         play = .vod(list: queue, index: i)
     }
 }

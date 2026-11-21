@@ -64,6 +64,8 @@ final class PlayerModel: ObservableObject {
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
         let m = VLCMedia(url: u)
         m.addOption(":network-caching=1500")
+        if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
+        if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
         player.media = m
         player.play()

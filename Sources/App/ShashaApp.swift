@@ -43,6 +43,7 @@ struct RootView: View {
                 NavigationStack { SetupView() }
             } else {
                 TabView {
+                    HomeView(play: $play).tabItem { Label("الرئيسية", systemImage: "house") }
                     LiveView(play: $play).tabItem { Label("القنوات", systemImage: "tv") }
                     MoviesView(play: $play).tabItem { Label("الأفلام", systemImage: "film") }
                     SeriesView(play: $play).tabItem { Label("المسلسلات", systemImage: "play.rectangle.on.rectangle") }

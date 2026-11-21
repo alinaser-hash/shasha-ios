@@ -23,9 +23,24 @@ struct Channel: Identifiable, Hashable {
     let logo: String?
     let categoryId: String
     let url: String
+    /// Catch-up days kept by the provider (0 = none).
+    var archiveDays: Int = 0
 }
 
-struct Movie: Identifiable, Hashable {
+/// One programme of a channel's guide.
+struct Programme: Identifiable, Hashable {
+    var id: String { "\(start.timeIntervalSince1970)-\(title)" }
+    let title: String
+    let detail: String?
+    let start: Date
+    let end: Date
+    /// Start time as the server wrote it ("yyyy-MM-dd HH:mm:ss", server time) — used for catch-up links.
+    let serverStart: String?
+    let hasArchive: Bool
+    var isNow: Bool { start <= Date() && Date() < end }
+    var isPast: Bool { end <= Date() }
+    var minutes: Int { max(1, Int(end.timeIntervalSince(start) / 60)) }
+}: Identifiable, Hashable {
     let id: String
     let name: String
     let poster: String?
@@ -62,6 +77,15 @@ struct MovieInfo {
     var year: String?
     var duration: String?
     var backdrop: String?
+    /// YouTube video id or link of the trailer, if the provider gives one.
+    var trailer: String?
+
+    /// Link that opens the trailer in YouTube (app or web).
+    var trailerURL: URL? {
+        guard let t = trailer?.trimmingCharacters(in: .whitespaces), !t.isEmpty else { return nil }
+        if t.hasPrefix("http") { return URL(string: t) }
+        return URL(string: "https://www.youtube.com/watch?v=" + t)
+    }
 }
 
 /// What is on a live channel now (Xtream short EPG).
