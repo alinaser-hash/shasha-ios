@@ -260,7 +260,8 @@ final class MPVCore {
                         self.note(line)
                         if self.pipOutput {
                             if line.contains("VO: [avfoundation]") { self.pipOutputReady = true }
-                            if line.contains("[error]") && (line.contains("avfoundation") || line.contains("vo/")) { self.pipOutputFailed = true }
+                            // Only the avfoundation output's own failure counts (other outputs log errors while switching).
+                            if line.contains("[error]") && line.contains("avfoundation") { self.pipOutputFailed = true }
                         }
                     }
                 case MPV_EVENT_START_FILE: self.note("[مرحلة] بدء الملف")
@@ -311,17 +312,16 @@ extension MPVCore {
         pipOutputReady = false; pipOutputFailed = false
         // Detailed log while the output switches, so a failure here is visible in the session file.
         if let h = mpv { mpv_request_log_messages(h, on ? "v" : "info") }
-        if on {
-            let ptr = Int(bitPattern: Unmanaged.passUnretained(pipLayer).toOpaque())
-            note("[مرحلة] صورة داخل صورة: تحويل المخرج إلى avfoundation")
-            setAsync("wid", String(ptr))
-            setAsync("vo", "avfoundation")
-        } else {
-            let ptr = Int(bitPattern: Unmanaged.passUnretained(view.metal).toOpaque())
-            note("[مرحلة] صورة داخل صورة: رجوع المخرج إلى \(createdLabVO)")
-            setAsync("wid", String(ptr))
-            setAsync("vo", createdLabVO)
-        }
+        // 0.9.5: changing "wid" makes mpv recreate the CURRENT video output with the new layer. The device crash
+        // (-[CAMetalLayer flush] unrecognized selector in the avfoundation output) was the avfoundation output
+        // recreated with the Metal layer. So the output goes through "null" (which ignores wid) while the layer
+        // changes: no output is ever created with the other output's layer.
+        let layer: AnyObject = on ? pipLayer : view.metal
+        let ptr = Int(bitPattern: Unmanaged.passUnretained(layer).toOpaque())
+        note("[مرحلة] صورة داخل صورة: \(on ? "تحويل المخرج إلى avfoundation" : "رجوع المخرج إلى \(createdLabVO)")")
+        setAsync("vo", "null")
+        setAsync("wid", String(ptr))
+        setAsync("vo", on ? "avfoundation" : createdLabVO)
     }
 }
 
