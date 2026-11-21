@@ -6,14 +6,17 @@ import Libmpv
 // Stage 1: a hand-off player like the Apple one — proves on the device whether mpv shows the files VLCKit can't
 // (Dolby Vision profile 5 colours, embedded ASS subtitles) before the engine replaces VLC in the main player.
 
-/// mpv lab: exactly one factor changed at a time (exclusive choice), kept between launches.
+/// mpv lab: exactly one factor changed at a time (exclusive choice), for the current hand-off only.
 enum MPVLab: String, CaseIterable {
     case normal = "عادي (gpu-next + فك عتادي)"
     case voGPU = "مخرج vo=gpu بدل gpu-next"
     case noHwdec = "بدون فك عتادي (hwdec=no)"
+    /// Memory only (0.8.4): 0.8.3 saved the choice, so a mode that crashes mpv stayed on for every later
+    /// file with no way back. Now every hand-off starts in normal mode, and the old saved value is erased.
+    private static var mode: MPVLab = { UserDefaults.standard.removeObject(forKey: "mpvLab"); return .normal }()
     static var current: MPVLab {
-        get { MPVLab(rawValue: UserDefaults.standard.string(forKey: "mpvLab") ?? "") ?? .normal }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "mpvLab") }
+        get { mode }
+        set { mode = newValue }
     }
 }
 

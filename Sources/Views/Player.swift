@@ -1046,6 +1046,7 @@ struct PlayerScreen: View {
         saveResume()
         let start = Double(model.timeMs) / 1000
         model.stop()        // one connection per account on many providers
+        MPVLab.current = .normal   // a lab mode never carries over to the next hand-off
         DiagLog.shared.note(String(format: "[التطبيق] تسليم إلى mpv عند %.0f ث", start))
         mpvPlayback = MPVPlayback(url: url, title: v.title, start: start)
     }
