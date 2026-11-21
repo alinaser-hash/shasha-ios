@@ -86,6 +86,10 @@ final class PlayerModel: ObservableObject {
     @Published var subDelay: Double = 0
     private var timer: Timer?
     private var live = false
+    /// Test switch from the subtitle panel: decode SSA/ASS with VLC's plain text decoder (subsdec) instead of libass.
+    var plainSubtitles = false
+    /// Subtitle track to re-select after a reopen (VLC track id).
+    var pendingSubtitleId: String?
     private var stall = StallDetector()
     /// The item really played in this session (VLC can read "stopped" for a moment right after opening).
     private var hasPlayed = false
@@ -100,14 +104,17 @@ final class PlayerModel: ObservableObject {
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
         guard let m = VLCMedia(url: u) else { failed = true; return }
         m.addOption(":network-caching=1500")
+        // Decoder priority list. VLC tries the modules in order for every stream and skips those that cannot decode it,
+        // so "subsdec" only takes the subtitle streams and "any" keeps the normal choice for the rest.
+        var codecs: [String] = []
+        if plainSubtitles { codecs.append("subsdec") }
         if PlayerPrefs.softwareDecoding {
-            // Dolby Vision mode (experimental). In libVLC 4 Dolby Vision is reshaped by the libplacebo "pl_scale"
-            // OpenGL filter, which needs FFmpeg (avcodec) decoding so the DoVi metadata reaches the output;
-            // the hardware decoder path drops it, giving green/purple pictures.
-            m.addOption(":codec=avcodec")
+            // Dolby Vision mode (experimental): FFmpeg decoding + libplacebo pl_scale filter.
+            codecs.append("avcodec")
             m.addOption(":avcodec-hw=none")
             m.addOption(":gl-filters=pl_scale")
         }
+        if !codecs.isEmpty { m.addOption(":codec=" + (codecs + ["any"]).joined(separator: ",")) }
         if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
         if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -135,6 +142,10 @@ final class PlayerModel: ObservableObject {
             endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs)
         }
         buffering = !failed && endDecision == nil && stalled
+        if let want = pendingSubtitleId, player.textTracks.contains(where: { $0.trackId == want }) {
+            pendingSubtitleId = nil
+            selectSubtitle(want)
+        }
         let h = Int(player.videoSize.height)
         if h > 0 && h != videoHeight { videoHeight = h }
     }
@@ -764,6 +775,12 @@ struct PlayerScreen: View {
                     model.selectSubtitle(t.id); refreshTracks(.subtitles); show("الترجمة: \(t.name)")
                 }
             }
+            if !panelTracks.isEmpty {
+                panelHeader("الترجمة محددة ولا تظهر؟")
+                panelRow(model.plainSubtitles ? "العرض كنص بسيط: مفعّل (اضغط للرجوع)" : "جرّب عرضها كنص بسيط (بدون libass)",
+                         selected: model.plainSubtitles, icon: "textformat") { togglePlainSubtitles() }
+                panelNote("يعيد فتح الحلقة من نفس النقطة بنفس الترجمة، ويفك ترجمات ASS بمفكّك VLC النصي بدل libass. اختبار للمقارنة، يضيع تنسيق الألوان والمواقع.")
+            }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             if !isLive {
                 panelHeader("من الإنترنت")
@@ -818,7 +835,7 @@ struct PlayerScreen: View {
         l.append("شاشة \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?")) — تشخيص التشغيل")
         l.append("الجهاز: iOS \(UIDevice.current.systemVersion)")
         l.append("المحرّك: VLCKit/libVLC \(VLCLibrary.shared().version)")
-        l.append("وضع Dolby Vision التجريبي: \(PlayerPrefs.softwareDecoding ? "مفعّل" : "متوقف")")
+        l.append("وضع Dolby Vision التجريبي: \(PlayerPrefs.softwareDecoding ? "مفعّل" : "متوقف") | ترجمة نصية بسيطة: \(model.plainSubtitles ? "مفعّل" : "متوقف")")
         l.append("العنوان: \(title)")
         if let v = current { l.append("الحاوية (حسب امتداد الرابط): \(v.container ?? "غير متاح")") } else { l.append("النوع: بث مباشر") }
         l.append("حالة المحرّك: \(stateName(model.player.state)) | الوقت \(fmt(model.timeMs)) / \(fmt(model.lengthMs))")
@@ -845,8 +862,8 @@ struct PlayerScreen: View {
         l.append("آخر اختيار: \(model.lastPick)")
         l.append("")
         l.append("— خطأ المحرّك الأخير: \(VLCLibrary.currentErrorMessage ?? "لا يوجد")")
-        l.append("— سجل VLC (\(diagDetailed ? "مفصّل" : "أخطاء وتحذيرات")، آخر 150 سطر)")
-        l.append(contentsOf: DiagLog.shared.recent(150))
+        l.append("— سجل VLC لهذا التشغيل (\(diagDetailed ? "مفصّل: فك الترميز والترجمة والعرض" : "أخطاء وتحذيرات")، المكرر مطوي)")
+        l.append(contentsOf: DiagLog.shared.recent(200))
         var secrets: [String] = []
         if let x = library.xtream {
             secrets += [x.user, x.pass]
@@ -985,6 +1002,7 @@ struct PlayerScreen: View {
 
     private func openLive() {
         let ch = channels[index]
+        DiagLog.shared.beginSession(ch.name)
         let s = gate.begin(key: "live:" + ch.id)
         session = s
         model.open(ch.url, live: true, session: s.id)
@@ -994,6 +1012,7 @@ struct PlayerScreen: View {
 
     /// Opens a film/episode as a new session: older tasks and saves can no longer touch it.
     private func openVod(_ v: VodPlay, from start: Double? = nil) {
+        DiagLog.shared.beginSession(v.title)
         let s = gate.begin(key: v.key)
         session = s
         lastSavedAtMs = nil
@@ -1050,6 +1069,15 @@ struct PlayerScreen: View {
             stoppedEarlyAt = at
             controls = true
         }
+    }
+
+    /// A/B test for "selected but not drawn": reopen with the plain text subtitle decoder and the same track.
+    private func togglePlainSubtitles() {
+        model.plainSubtitles.toggle()
+        model.pendingSubtitleId = model.player.textTracks.first(where: \.isSelected)?.trackId
+        if isLive { openLive() } else if let v = current { saveResume(); openVod(v, from: Double(model.timeMs) / 1000) }
+        closePanel()
+        show(model.plainSubtitles ? "ترجمة نصية بسيطة — انتظر جملة حوار" : "رجوع لمفكّك الترجمة العادي")
     }
 
     /// Reopens the same item at the same point with the other decoder (remembered for next time).
