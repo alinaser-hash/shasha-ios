@@ -1,6 +1,6 @@
 import SwiftUI
 import UIKit
-import MobileVLCKit
+import VLCKit
 import MediaPlayer
 
 /// What to play: a live channel inside its list (switch channels) or a film/episode inside its queue.
@@ -31,6 +31,36 @@ struct VodPlay: Hashable {
 /// VLCKit player state, polled twice a second (simple and robust across VLCKit versions).
 final class PlayerModel: ObservableObject {
     let player = VLCMediaPlayer()
+    /// The view VLC draws into; also the picture-in-picture source (VLCKit 4).
+    let videoView = ShashaPiPView()
+    /// Picture in picture can be started for the current video.
+    @Published var pipReady = false
+    /// The video is in the floating window.
+    @Published var pipActive = false
+
+    init() {
+        videoView.backgroundColor = .black
+        videoView.player = player
+        player.drawable = videoView
+        videoView.onPlay = { [weak self] in self?.command(.play) }
+        videoView.onPause = { [weak self] in self?.command(.pause) }
+        videoView.onReady = { [weak self] c in
+            self?.pipReady = true
+            c.stateChangeEventHandler = { started in
+                DispatchQueue.main.async { self?.pipActive = started }
+            }
+        }
+    }
+
+    func togglePiP() {
+        guard let c = videoView.windowController else { return }
+        if pipActive { c.stopPictureInPicture() } else { c.startPictureInPicture() }
+    }
+
+    func startPiPIfPossible() {
+        guard !pipActive, playing, let c = videoView.windowController else { return }
+        c.startPictureInPicture()
+    }
     @Published var timeMs: Int32 = 0
     @Published var lengthMs: Int32 = 0
     @Published var playing = false
@@ -59,6 +89,7 @@ final class PlayerModel: ObservableObject {
         engineSessionId = session
         guard let u = URL(string: url) else { failed = true; return }
         self.live = live
+        videoView.liveStream = live
         failed = false; endDecision = nil; viewerPaused = false; hasPlayed = false
         subDelay = 0; stall.reset(); buffering = true; timeMs = 0; lengthMs = 0
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
@@ -77,13 +108,13 @@ final class PlayerModel: ObservableObject {
     private func tick() {
         // Written so it compiles whether VLCKit imports these as optional or not.
         let t = (player.time as VLCTime?)?.intValue ?? 0
-        let len = (player.media as VLCMedia?)?.length.intValue ?? 0
+        let len = ((player.media as VLCMedia?)?.length as VLCTime?)?.intValue ?? 0
         let st = Self.map(player.state)
         timeMs = t
         if len > 0 { lengthMs = len }
         playing = player.isPlaying
         if st == .playing || st == .buffering, t > 0 { lastPlayingMs = t; hasPlayed = true }
-        if st == .error || (live && st == .ended) { failed = true }
+        if st == .error || (live && hasPlayed && st == .stopped) { failed = true }
         let stalled = stall.sample(timeMs: t, state: st, viewerPaused: viewerPaused)
         if !live, endDecision == nil, hasPlayed,
            EndRule.engineStopped(state: st, viewerPaused: viewerPaused, frozenMs: stall.frozenMs, timeMs: lastPlayingMs, lengthMs: lengthMs) {
@@ -100,8 +131,7 @@ final class PlayerModel: ObservableObject {
         case .buffering: return .buffering
         case .playing: return .playing
         case .paused: return .paused
-        case .stopped: return .stopped
-        case .ended: return .ended
+        case .stopped, .stopping: return .stopped
         case .error: return .error
         default: return .buffering
         }
@@ -124,14 +154,14 @@ final class PlayerModel: ObservableObject {
     /// Picture shape. VLC copies the strings it is given.
     func apply(_ f: Fit) {
         player.videoAspectRatio = nil
-        player.videoCropGeometry = nil
+        player.setCropRatioWithNumerator(0, denominator: 0)
         switch f {
         case .fit: break
         case .fill:
             let b = UIScreen.main.bounds
-            player.videoCropGeometry = strdup("\(Int(max(b.width, b.height))):\(Int(min(b.width, b.height)))")
-        case .wide: player.videoAspectRatio = strdup("16:9")
-        case .classic: player.videoAspectRatio = strdup("4:3")
+            player.setCropRatioWithNumerator(UInt32(max(b.width, b.height)), denominator: UInt32(min(b.width, b.height)))
+        case .wide: player.videoAspectRatio = "16:9"
+        case .classic: player.videoAspectRatio = "4:3"
         }
     }
 
@@ -141,12 +171,14 @@ final class PlayerModel: ObservableObject {
         if viewerPaused { player.pause() } else { player.play() }
         playing = !viewerPaused
         stall.reset()
+        videoView.windowController?.invalidatePlaybackState()
     }
     func jump(_ seconds: Int32) { seek(toMs: Int32(max(0, Int(timeMs) + Int(seconds) * 1000))) }
     func seek(toMs ms: Int32) {
         let target = lengthMs > 0 ? min(ms, lengthMs - 1000) : ms
         player.time = VLCTime(int: max(0, target))
         timeMs = max(0, target); stall.reset()
+        videoView.windowController?.invalidatePlaybackState()
     }
 
     /// App volume 0…200 (100 = normal).
@@ -166,14 +198,12 @@ final class PlayerModel: ObservableObject {
     /// Adds a downloaded subtitle file and switches to it.
     func addSubtitle(_ file: URL) { player.addPlaybackSlave(file, type: .subtitle, enforce: true) }
 
-    struct Track: Identifiable { let id: Int32; let name: String }
-    var audioTracks: [Track] { tracks(player.audioTrackIndexes as [Any]?, player.audioTrackNames as [Any]?) }
-    var subtitleTracks: [Track] { tracks(player.videoSubTitlesIndexes as [Any]?, player.videoSubTitlesNames as [Any]?) }
-    private func tracks(_ ids: [Any]?, _ names: [Any]?) -> [Track] {
-        let i = (ids ?? []).compactMap { ($0 as? NSNumber)?.int32Value }
-        let n = (names ?? []).map { "\($0)" }
-        return zip(i, n).map { Track(id: $0, name: $1) }
-    }
+    struct Track: Identifiable { let id: Int; let name: String; let selected: Bool }
+    var audioTracks: [Track] { player.audioTracks.enumerated().map { Track(id: $0.offset, name: $0.element.trackName, selected: $0.element.isSelected) } }
+    var subtitleTracks: [Track] { player.textTracks.enumerated().map { Track(id: $0.offset, name: $0.element.trackName, selected: $0.element.isSelected) } }
+    func selectAudio(_ i: Int) { let t = player.audioTracks; if t.indices.contains(i) { t[i].isSelectedExclusively = true } }
+    func selectSubtitle(_ i: Int) { let t = player.textTracks; if t.indices.contains(i) { t[i].isSelectedExclusively = true } }
+    func subtitlesOff() { player.deselectAllTextTracks() }
 
     // Lock screen / Control Center.
     private var remoteTargets: [Any] = []
@@ -205,9 +235,12 @@ final class PlayerModel: ObservableObject {
 struct VLCView: UIViewRepresentable {
     let model: PlayerModel
     func makeUIView(context: Context) -> UIView {
-        let v = UIView(); v.backgroundColor = .black
-        model.player.drawable = v
-        return v
+        let host = UIView(); host.backgroundColor = .black
+        let v = model.videoView
+        v.frame = host.bounds
+        v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        host.addSubview(v)
+        return host
     }
     func updateUIView(_ uiView: UIView, context: Context) {}
 }
@@ -216,9 +249,12 @@ struct VLCView: UIViewRepresentable {
 
 struct PlayerScreen: View {
     let item: PlayItem
+    /// Closes the player (it is shown as an overlay so it can stay alive behind picture in picture).
+    let close: () -> Void
+    /// The overlay is hidden while the video is in the floating window.
+    @Binding var minimized: Bool
     @EnvironmentObject var library: Library
     @EnvironmentObject var epg: EPG
-    @Environment(\.dismiss) private var dismiss
     @StateObject private var model = PlayerModel()
 
     @State private var index = 0
@@ -291,8 +327,8 @@ struct PlayerScreen: View {
                 if let at = stoppedEarlyAt { stoppedEarlyPanel(at) }
             }
         }
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
+        .statusBarHidden(!minimized)
+        .persistentSystemOverlays(minimized ? .automatic : .hidden)
         .sheet(item: $sheet) { s in
             switch s {
             case .subs:
@@ -315,7 +351,15 @@ struct PlayerScreen: View {
             guard let d, !isLive else { return }
             handleEnd(d)
         }
-        .onChange(of: scenePhase) { p in if p != .active { saveResume() } }
+        .onChange(of: scenePhase) { p in
+            if p != .active { saveResume() }
+            // Leaving the app while a video plays: continue in the floating window.
+            if p == .inactive && PlayerPrefs.autoPiP { model.startPiPIfPossible() }
+        }
+        .onChange(of: model.pipActive) { on in
+            minimized = on
+            if on { Orientation.portrait() } else { Orientation.landscape(); controls = true; scheduleHide() }
+        }
         .onAppear { start(); Orientation.landscape(); UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear {
             saveResume()
@@ -408,7 +452,7 @@ struct PlayerScreen: View {
 
     private var topBar: some View {
         HStack(spacing: 6) {
-            iconButton("chevron.down") { dismiss() }
+            iconButton("chevron.down") { close() }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline).lineLimit(1)
                 if let n = nowOnAir {
@@ -419,6 +463,9 @@ struct PlayerScreen: View {
             if let q = model.quality {
                 Text(q).font(.caption2.bold()).padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
+            }
+            if model.pipReady {
+                iconButton(model.pipActive ? "pip.exit" : "pip.enter") { model.togglePiP() }
             }
             iconButton("lock.open") { locked = true; controls = true; scheduleHide(); show("الشاشة مقفلة — اضغط القفل للفتح") }
             audioMenu
@@ -510,7 +557,7 @@ struct PlayerScreen: View {
             HStack {
                 Button("إعادة المحاولة") { retry() }.buttonStyle(.borderedProminent)
                 if isLive { Button("القنوات") { sheet = .channels }.buttonStyle(.bordered) }
-                Button("إغلاق") { dismiss() }.buttonStyle(.bordered)
+                Button("إغلاق") { close() }.buttonStyle(.bordered)
             }
         }
         .padding(20).background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white)
@@ -523,7 +570,7 @@ struct PlayerScreen: View {
             HStack {
                 Button("إعادة المحاولة من نفس النقطة") { retryFrom(at) }.buttonStyle(.borderedProminent)
                 if nextUp != nil { Button("الحلقة التالية") { playEpisode(index + 1) }.buttonStyle(.bordered) }
-                Button("إغلاق") { dismiss() }.buttonStyle(.bordered)
+                Button("إغلاق") { close() }.buttonStyle(.bordered)
             }
         }
         .padding(20).background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white)
@@ -566,8 +613,8 @@ struct PlayerScreen: View {
             let tracks = model.audioTracks
             if tracks.isEmpty { Text("لا توجد مسارات صوت") }
             ForEach(tracks) { t in
-                Button { model.player.currentAudioTrackIndex = t.id; show("الصوت: \(t.name)") } label: {
-                    if model.player.currentAudioTrackIndex == t.id { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
+                Button { model.selectAudio(t.id); show("الصوت: \(t.name)") } label: {
+                    if t.selected { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
                 }
             }
         } label: { menuIcon("waveform") }
@@ -579,10 +626,11 @@ struct PlayerScreen: View {
                 let tracks = model.subtitleTracks
                 if tracks.isEmpty { Text("لا توجد ترجمة داخل الملف") }
                 ForEach(tracks) { t in
-                    Button { model.player.currentVideoSubTitleIndex = t.id } label: {
-                        if model.player.currentVideoSubTitleIndex == t.id { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
+                    Button { model.selectSubtitle(t.id) } label: {
+                        if t.selected { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
                     }
                 }
+                if !tracks.isEmpty { Button { model.subtitlesOff() } label: { Label("إيقاف الترجمة", systemImage: "captions.bubble.fill") } }
             }
             if !isLive {
                 Button { sheet = .subs } label: { Label("ترجمة من الإنترنت…", systemImage: "globe") }
@@ -725,7 +773,7 @@ struct PlayerScreen: View {
         switch d {
         case .finished:
             Store.setPosition(c.key, 1, 1)
-            if nextUp != nil && !nextDismissed { playEpisode(index + 1) } else { dismiss() }
+            if nextUp != nil && !nextDismissed { playEpisode(index + 1) } else { close() }
         case .stoppedEarly:
             let at = model.lastPlayingMs
             if let save = ResumeRule.save(screen: session, engineSessionId: model.engineSessionId, timeMs: at, lengthMs: model.lengthMs) {

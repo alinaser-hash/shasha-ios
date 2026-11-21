@@ -1,7 +1,7 @@
 platform :ios, '16.0'
 # VLCKit plays what Apple's player can't: MPEG-TS live streams, MKV, AC-3/E-AC-3 audio, embedded subtitles.
 target 'ShashaIOS' do
-  pod 'MobileVLCKit', '~> 3.6.0'
+  pod 'VLCKit', '4.0.0a18'   # VLCKit 4: picture in picture
 end
 post_install do |installer|
   installer.pods_project.targets.each do |t|

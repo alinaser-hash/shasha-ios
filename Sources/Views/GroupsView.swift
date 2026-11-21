@@ -74,8 +74,14 @@ struct GroupsSettingsSection: View {
 struct LanguageSettingsSection: View {
     @AppStorage(PlayerPrefs.audioKey) private var audio = ""
     @AppStorage(PlayerPrefs.subsKey) private var subs = ""
+    @AppStorage(PlayerPrefs.autoPiPKey) private var autoPiP = true
 
     var body: some View {
+        Section {
+            Toggle("صورة داخل صورة عند الخروج من التطبيق", isOn: $autoPiP)
+        } header: { Text("المشغّل") } footer: {
+            Text("إذا خرجت من التطبيق والفيديو شغّال، يكمل في نافذة صغيرة فوق التطبيقات. تقدر تشغّلها يدويًا من زر ⧉ في المشغّل.")
+        }
         Section {
             Picker("الصوت", selection: $audio) {
                 Text("لغة الملف").tag("")
@@ -94,7 +100,9 @@ struct LanguageSettingsSection: View {
 }
 
 enum PlayerPrefs {
-    static let audioKey = "pref.audio", subsKey = "pref.subs"
+    static let audioKey = "pref.audio", subsKey = "pref.subs", autoPiPKey = "pref.autopip"
+    /// Leaving the app while a video plays moves it to the floating window (default on).
+    static var autoPiP: Bool { UserDefaults.standard.object(forKey: autoPiPKey) as? Bool ?? true }
     static let arabic = "ara,ar,arabic", english = "eng,en,english"
     static var audio: String { UserDefaults.standard.string(forKey: audioKey) ?? "" }
     static var subs: String { UserDefaults.standard.string(forKey: subsKey) ?? "" }

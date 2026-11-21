@@ -1,6 +1,6 @@
 # شاشة — iPhone
 
-The iPhone version of Shasha (Arabic, right-to-left). SwiftUI + VLCKit (plays live MPEG-TS, MKV, AC-3/E-AC-3, embedded subtitles).
+The iPhone version of Shasha (Arabic, right-to-left). SwiftUI + VLCKit 4 (plays live MPEG-TS, MKV, AC-3/E-AC-3, embedded subtitles).
 
 ## Build (no Mac needed)
 Every push to `main` runs **GitHub Actions** (`.github/workflows/build.yml`) on a macOS runner:
