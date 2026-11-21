@@ -621,7 +621,16 @@ struct PlayerScreen: View {
                 Text(q).font(.caption2.bold()).padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 5)).foregroundStyle(.black)
             }
-            if model.pipReady {
+            if !isLive, current != nil {
+                // The mpv engine, one tap away (Dolby Vision colours, embedded ASS subtitles).
+                Button { openMPV() } label: {
+                    Label("mpv", systemImage: "bolt.horizontal.circle.fill").font(.callout.bold())
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(Theme.teal, in: Capsule()).foregroundStyle(.black)
+                }
+                .accessibilityLabel("تشغيل بمحرّك mpv")
+            }
+                        if model.pipReady {
                 iconButton(model.pipActive ? "pip.exit" : "pip.enter") { model.togglePiP() }
             }
             iconButton("lock.open") { locked = true; controls = true; scheduleHide(); show("الشاشة مقفلة — اضغط القفل للفتح") }
