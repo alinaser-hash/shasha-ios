@@ -787,6 +787,7 @@ struct PlayerScreen: View {
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
             if !isLive {
                 panelHeader("من الإنترنت")
+                panelRow("أفضل ترجمة عربية تلقائيًا", icon: "sparkles") { closePanel(); autoArabicSubtitle() }
                 panelRow("بحث في OpenSubtitles…", icon: "globe") { closePanel(); sheet = .subs }
             }
             panelHeader("التوقيت: " + (model.subDelay == 0 ? "الأصلي" : String(format: "%+.1f ث", model.subDelay)))
@@ -1104,6 +1105,29 @@ struct PlayerScreen: View {
         openVod(v, from: 0)
         show("من البداية")
         scheduleHide()
+    }
+
+    /// One tap: the most downloaded Arabic subtitle for this film/episode from OpenSubtitles, loaded into the player.
+    private func autoArabicSubtitle() {
+        guard let v = current else { return }
+        guard OnlineSubs.hasKey else { show("أضف مفتاح OpenSubtitles من الإعدادات"); return }
+        show("أبحث عن ترجمة عربية…")
+        let id = session?.id
+        Task {
+            do {
+                let results = try await OnlineSubs.search(v.query)
+                guard let best = results.first(where: { $0.language == "ar" }) else {
+                    await MainActor.run { show("ما لقيت ترجمة عربية — جرّب البحث اليدوي") }; return
+                }
+                let file = try await OnlineSubs.download(best)
+                await MainActor.run {
+                    guard gate.isCurrent(id) else { return }
+                    model.addSubtitle(file); show("تمت إضافة الترجمة العربية")
+                }
+            } catch {
+                await MainActor.run { show(error.localizedDescription) }
+            }
+        }
     }
 
     private func retryFrom(_ at: Int32) {
