@@ -300,6 +300,13 @@ struct PlayerScreen: View {
     @State private var session: PlaybackSession?
     @State private var lastSavedAtMs: Int32?
     @State private var resumeTask: Task<Void, Never>?
+    /// Side panel for audio / subtitles / picture / speed. While open, controls never auto-hide.
+    @State private var panel: Panel?
+    /// Tracks read once when a panel opens (and after each pick), so the list never moves under the finger.
+    @State private var panelTracks: [PlayerModel.Track] = []
+    @State private var applePlayer: ApplePlayback?
+
+    enum Panel: String, Identifiable { case audio, subtitles, picture, speed; var id: String { rawValue } }
     @Environment(\.scenePhase) private var scenePhase
 
     enum GestureKind { case seek, brightness, volume }
@@ -349,12 +356,16 @@ struct PlayerScreen: View {
                         .background(.black.opacity(0.75), in: Capsule()).foregroundStyle(.white)
                         .frame(maxHeight: .infinity, alignment: .top).padding(.top, 64).allowsHitTesting(false)
                 }
+                if let p = panel, !locked { panelView(p) }
                 if model.failed { failedPanel }
                 if let at = stoppedEarlyAt { stoppedEarlyPanel(at) }
             }
         }
         .statusBarHidden(!minimized)
         .persistentSystemOverlays(minimized ? .automatic : .hidden)
+        .fullScreenCover(item: $applePlayer) { a in
+            ApplePlayerView(playback: a) { pos, dur, failed in returnFromApplePlayer(pos, dur, failed) }
+        }
         .sheet(item: $sheet) { s in
             switch s {
             case .subs:
@@ -495,9 +506,9 @@ struct PlayerScreen: View {
                 iconButton(model.pipActive ? "pip.exit" : "pip.enter") { model.togglePiP() }
             }
             iconButton("lock.open") { locked = true; controls = true; scheduleHide(); show("الشاشة مقفلة — اضغط القفل للفتح") }
-            audioMenu
-            subtitleMenu
-            pictureMenu
+            iconButton("waveform") { openPanel(.audio) }
+            iconButton("captions.bubble") { openPanel(.subtitles) }
+            iconButton("aspectratio") { openPanel(.picture) }
         }
         .padding(.horizontal, 12).padding(.top, 6)
     }
@@ -545,7 +556,7 @@ struct PlayerScreen: View {
                     Text("ينتهي \(endsAt)").font(.caption).opacity(0.85)
                 }
                 Spacer()
-                speedMenu
+                pill(model.rate == 1 ? "السرعة" : rateText(model.rate), "speedometer") { openPanel(.speed) }
                 if !queue.isEmpty && current?.season != nil {
                     pill("الحلقات", "list.bullet") { sheet = .episodes }
                 }
@@ -639,69 +650,166 @@ struct PlayerScreen: View {
 
     // MARK: Menus
 
-    private var audioMenu: some View {
-        Menu {
-            let tracks = model.audioTracks
-            if tracks.isEmpty { Text("لا توجد مسارات صوت") }
-            ForEach(tracks) { t in
-                Button { model.selectAudio(t.id); show("الصوت: \(t.name)") } label: {
-                    if t.selected { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
-                }
-            }
-        } label: { menuIcon("waveform") }
+    // MARK: Side panel (replaces pop-up menus: steady list, big rows, no auto-hide while open)
+
+    private func openPanel(_ p: Panel) {
+        hideTask?.cancel()
+        panelTracks = p == .audio ? model.audioTracks : p == .subtitles ? model.subtitleTracks : []
+        withAnimation(.easeOut(duration: 0.18)) { panel = p }
     }
 
-    private var subtitleMenu: some View {
-        Menu {
-            Section("ترجمات الملف") {
-                let tracks = model.subtitleTracks
-                if tracks.isEmpty { Text("لا توجد ترجمة داخل الملف") }
-                ForEach(tracks) { t in
-                    Button { model.selectSubtitle(t.id) } label: {
-                        if t.selected { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
-                    }
+    private func closePanel() {
+        withAnimation(.easeIn(duration: 0.15)) { panel = nil }
+        scheduleHide()
+    }
+
+    private func panelView(_ p: Panel) -> some View {
+        HStack(spacing: 0) {
+            Color.black.opacity(0.35).contentShape(Rectangle()).onTapGesture { closePanel() }
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text(panelTitle(p)).font(.headline)
+                    Spacer()
+                    Button { closePanel() } label: { Image(systemName: "xmark").font(.headline).frame(width: 40, height: 40) }
                 }
-                if !tracks.isEmpty { Button { model.subtitlesOff() } label: { Label("إيقاف الترجمة", systemImage: "captions.bubble.fill") } }
+                .padding(.horizontal, 16).padding(.top, 10)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) { panelRows(p) }.padding(.horizontal, 8).padding(.bottom, 16)
+                }
+            }
+            .frame(width: 340)
+            .frame(maxHeight: .infinity)
+            .background(.ultraThinMaterial)
+            .background(Color.black.opacity(0.55))
+            .environment(\.layoutDirection, .rightToLeft)
+        }
+        .environment(\.layoutDirection, .leftToRight)
+        .foregroundStyle(.white)
+        .ignoresSafeArea()
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+    }
+
+    private func panelTitle(_ p: Panel) -> String {
+        switch p { case .audio: return "الصوت"; case .subtitles: return "الترجمة"; case .picture: return "الصورة"; case .speed: return "السرعة" }
+    }
+
+    @ViewBuilder private func panelRows(_ p: Panel) -> some View {
+        switch p {
+        case .audio:
+            if panelTracks.isEmpty { panelNote("لا توجد مسارات صوت في هذا الملف.") }
+            ForEach(panelTracks) { t in
+                panelRow(t.name, selected: t.selected) {
+                    model.selectAudio(t.id); refreshTracks(.audio); show("الصوت: \(t.name)")
+                }
+            }
+        case .subtitles:
+            panelHeader("ترجمات الملف")
+            if panelTracks.isEmpty { panelNote("لا توجد ترجمة داخل هذا الملف.") }
+            else {
+                panelRow("بدون ترجمة", selected: !panelTracks.contains(where: \.selected)) {
+                    model.subtitlesOff(); refreshTracks(.subtitles); show("بدون ترجمة")
+                }
+            }
+            ForEach(panelTracks) { t in
+                panelRow(t.name, selected: t.selected) {
+                    model.selectSubtitle(t.id); refreshTracks(.subtitles); show("الترجمة: \(t.name)")
+                }
             }
             if !isLive {
-                Button { sheet = .subs } label: { Label("ترجمة من الإنترنت…", systemImage: "globe") }
+                panelHeader("من الإنترنت")
+                panelRow("بحث في OpenSubtitles…", icon: "globe") { closePanel(); sheet = .subs }
             }
-            Section("التوقيت: \(model.subDelay == 0 ? "الأصلي" : String(format: "%+.1f ث", model.subDelay))") {
-                Button { model.shiftSubs(-0.5); show(delayText) } label: { Label("أبكر ٠٫٥ ث", systemImage: "minus.circle") }
-                Button { model.shiftSubs(0.5); show(delayText) } label: { Label("أتأخر ٠٫٥ ث", systemImage: "plus.circle") }
-                if model.subDelay != 0 { Button { model.shiftSubs(0); show(delayText) } label: { Label("إرجاع التوقيت", systemImage: "arrow.uturn.backward") } }
+            panelHeader("التوقيت: " + (model.subDelay == 0 ? "الأصلي" : String(format: "%+.1f ث", model.subDelay)))
+            HStack(spacing: 10) {
+                panelButton("أبكر ٠٫٥", "minus") { model.shiftSubs(-0.5); show(delayText) }
+                panelButton("أتأخر ٠٫٥", "plus") { model.shiftSubs(0.5); show(delayText) }
+                if model.subDelay != 0 { panelButton("الأصلي", "arrow.uturn.backward") { model.shiftSubs(0); show(delayText) } }
             }
-        } label: { menuIcon("captions.bubble") }
-    }
-
-    private var pictureMenu: some View {
-        Menu {
-            Section("شكل الصورة") {
-                ForEach(PlayerModel.Fit.allCases, id: \.self) { f in
-                    Button { fit = f; model.apply(f); show(f.rawValue) } label: { if fit == f { Label(f.rawValue, systemImage: "checkmark") } else { Text(f.rawValue) } }
-                }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+        case .picture:
+            panelHeader("شكل الصورة")
+            ForEach(PlayerModel.Fit.allCases, id: \.self) { f in
+                panelRow(f.rawValue, selected: fit == f) { fit = f; model.apply(f); show(f.rawValue) }
             }
-            Section("الألوان") {
-                Button { switchDecoder() } label: {
-                    Label(PlayerPrefs.softwareDecoding ? "رجوع لفك الترميز العتادي" : "ألوان غلط؟ فك ترميز برمجي",
-                          systemImage: "paintpalette")
-                }
+            if !isLive, current != nil {
+                panelHeader("ألوان HDR / Dolby Vision")
+                panelRow("فتح بمشغّل Apple", icon: "apple.logo") { closePanel(); openApplePlayer() }
+                panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
-        } label: { menuIcon("aspectratio") }
-    }
-
-    private var speedMenu: some View {
-        Menu {
+            panelHeader("فك الترميز")
+            panelRow(PlayerPrefs.softwareDecoding ? "برمجي (اضغط للرجوع للعتادي)" : "عتادي (اضغط للتجربة البرمجية)", icon: "cpu") { switchDecoder() }
+        case .speed:
             ForEach([Float(0.5), 0.75, 1, 1.25, 1.5, 2], id: \.self) { r in
-                Button { model.setRate(r); show("السرعة \(rateText(r))") } label: {
-                    if model.rate == r { Label(rateText(r), systemImage: "checkmark") } else { Text(rateText(r)) }
-                }
+                panelRow(rateText(r), selected: model.rate == r) { model.setRate(r); show("السرعة \(rateText(r))") }
             }
-        } label: {
-            Label(model.rate == 1 ? "السرعة" : rateText(model.rate), systemImage: "speedometer")
-                .font(.caption.bold()).padding(.horizontal, 12).padding(.vertical, 7)
-                .background(.white.opacity(0.16), in: Capsule())
         }
+    }
+
+    private func refreshTracks(_ p: Panel) {
+        // VLC applies the pick asynchronously; read again shortly after so the tick shows the real choice.
+        panelTracks = p == .audio ? model.audioTracks : model.subtitleTracks
+        Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            await MainActor.run { if panel == p { panelTracks = p == .audio ? model.audioTracks : model.subtitleTracks } }
+        }
+    }
+
+    private func panelRow(_ text: String, selected: Bool = false, icon: String? = nil, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : (icon ?? "circle"))
+                    .foregroundStyle(selected ? Theme.accent : .white.opacity(icon == nil ? 0.35 : 0.9))
+                    .frame(width: 24)
+                Text(text).multilineTextAlignment(.leading).lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 12)
+            .background(selected ? Theme.accent.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func panelButton(_ text: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(text, systemImage: icon).font(.callout).padding(.horizontal, 12).padding(.vertical, 9)
+                .background(.white.opacity(0.14), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func panelHeader(_ t: String) -> some View {
+        Text(t).font(.caption.bold()).foregroundStyle(.white.opacity(0.6)).padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 4)
+    }
+
+    private func panelNote(_ t: String) -> some View {
+        Text(t).font(.caption).foregroundStyle(.white.opacity(0.6)).padding(.horizontal, 12).padding(.vertical, 6)
+    }
+
+    // MARK: Apple player (AVKit): correct Dolby Vision colours, AirPlay, system picture in picture
+
+    private func openApplePlayer() {
+        guard let v = current, let url = URL(string: v.url) else { return }
+        saveResume()
+        let start = Double(model.timeMs) / 1000
+        // Stop VLC completely: many providers allow only one connection per account.
+        model.stop()
+        applePlayer = ApplePlayback(url: url, start: start, key: v.key)
+    }
+
+    /// Back from the Apple player: save its position and continue in VLC from there (or close if it ended).
+    private func returnFromApplePlayer(_ positionS: Double, _ durationS: Double, _ failed: Bool) {
+        let start = applePlayer?.start ?? 0
+        applePlayer = nil
+        guard let v = current else { return }
+        if failed { openVod(v, from: start); show("مشغّل Apple لا يدعم هذا الملف"); return }
+        if durationS > 0 { Store.setPosition(v.key, positionS, durationS) }
+        if durationS > 0 && EndRule.isComplete(timeMs: Int32(positionS * 1000), lengthMs: Int32(durationS * 1000)) {
+            Store.setPosition(v.key, 1, 1)
+            if nextUp != nil { playEpisode(index + 1) } else { close() }
+            return
+        }
+        openVod(v, from: positionS)
     }
 
     // MARK: Small views
@@ -856,7 +964,7 @@ struct PlayerScreen: View {
         let id = session?.id
         hideTask = Task {
             _ = await Delayed.run(after: 4_500_000_000, stillValid: { await MainActor.run { gate.isCurrent(id) } }) {
-                await MainActor.run { if sheet == nil && stoppedEarlyAt == nil && !model.failed { withAnimation { controls = false } } }
+                await MainActor.run { if sheet == nil && panel == nil && stoppedEarlyAt == nil && !model.failed { withAnimation { controls = false } } }
             }
         }
     }
