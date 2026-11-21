@@ -1,0 +1,191 @@
+import XCTest
+@testable import PlaybackLogic
+
+final class StallDetectorTests: XCTestCase {
+    func feed(_ d: inout StallDetector, _ samples: [(Int32, EngineState)], paused: Bool = false) -> [Bool] {
+        samples.map { d.sample(timeMs: $0.0, state: $0.1, viewerPaused: paused) }
+    }
+
+    func testOpeningShowsSpinner() {
+        var d = StallDetector()
+        XCTAssertTrue(d.sample(timeMs: 0, state: .opening, viewerPaused: false))
+    }
+
+    func testPlayingWithMovingClockNeverSpins() {
+        var d = StallDetector()
+        // VLC says "buffering" while the clock moves: no spinner.
+        let r = feed(&d, [(500, .buffering), (1000, .buffering), (1500, .playing), (2000, .buffering), (2500, .buffering)])
+        XCTAssertEqual(r, [false, false, false, false, false])
+    }
+
+    func testFrozenClockSpinsAfterThreeTicks() {
+        var d = StallDetector()
+        let r = feed(&d, [(1000, .playing), (1000, .buffering), (1000, .buffering), (1000, .buffering), (1500, .playing)])
+        XCTAssertEqual(r, [false, false, false, true, false])
+    }
+
+    func testViewerPauseNeverSpins() {
+        var d = StallDetector()
+        let r = feed(&d, [(1000, .playing), (1000, .playing), (1000, .playing), (1000, .playing), (1000, .paused)], paused: true)
+        XCTAssertEqual(r, [false, false, false, false, false])
+    }
+
+    func testEnginePausedEndedErrorNeverSpin() {
+        var d = StallDetector()
+        for s: EngineState in [.paused, .ended, .error, .stopped] {
+            XCTAssertFalse(d.sample(timeMs: 1000, state: s, viewerPaused: false))
+            XCTAssertFalse(d.sample(timeMs: 1000, state: s, viewerPaused: false))
+            XCTAssertFalse(d.sample(timeMs: 1000, state: s, viewerPaused: false))
+            XCTAssertFalse(d.sample(timeMs: 1000, state: s, viewerPaused: false))
+        }
+    }
+
+    func testSeekResetThenRebufferSpins() {
+        var d = StallDetector()
+        _ = feed(&d, [(10_000, .playing), (10_500, .playing)])
+        d.reset()                                   // viewer seeked to 600 s
+        let r = feed(&d, [(600_000, .buffering), (600_000, .buffering), (600_000, .buffering), (600_000, .buffering), (600_400, .playing)])
+        XCTAssertEqual(r, [false, false, false, true, false])
+    }
+
+    func testLiveClockMovingNoSpinner() {
+        var d = StallDetector()
+        let r = feed(&d, (1...10).map { (Int32($0 * 500), EngineState.buffering) })
+        XCTAssertFalse(r.contains(true))
+    }
+}
+
+final class EndRuleTests: XCTestCase {
+    let len: Int32 = 2_700_000   // 45 min
+
+    func testEndAtRealEndIsFinished() {
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: len - 2_000, lengthMs: len), .finished)
+    }
+
+    func testEndInLastMinuteIsFinished() {
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: len - 59_000, lengthMs: len), .finished)
+    }
+
+    func testEndAt95PercentIsFinished() {
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: Int32(Double(len) * 0.95), lengthMs: len), .finished)
+    }
+
+    func testEarlyEndIsNotFinished() {
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: 600_000, lengthMs: len), .stoppedEarly)
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: len - 5 * 60_000, lengthMs: len), .stoppedEarly)
+    }
+
+    func testUnknownLengthOrZeroClockIsNotFinished() {
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: 600_000, lengthMs: 0), .stoppedEarly)
+        XCTAssertEqual(EndRule.onEnded(lastTimeMs: 0, lengthMs: len), .stoppedEarly)
+    }
+}
+
+final class NextCardRuleTests: XCTestCase {
+    let len: Int32 = 2_700_000
+
+    func testShowsOnlyNearTheEnd() {
+        XCTAssertFalse(NextCardRule.visible(current: false, hasNext: true, dismissed: false, timeMs: len - 60_000, lengthMs: len, scrubbing: false))
+        XCTAssertTrue(NextCardRule.visible(current: false, hasNext: true, dismissed: false, timeMs: len - 39_000, lengthMs: len, scrubbing: false))
+    }
+
+    func testStaysVisibleWithoutCountingDownAndHidesWhenSeekingBack() {
+        XCTAssertTrue(NextCardRule.visible(current: true, hasNext: true, dismissed: false, timeMs: len - 1_000, lengthMs: len, scrubbing: false))
+        XCTAssertTrue(NextCardRule.visible(current: true, hasNext: true, dismissed: false, timeMs: len - 42_000, lengthMs: len, scrubbing: false))
+        XCTAssertFalse(NextCardRule.visible(current: true, hasNext: true, dismissed: false, timeMs: len - 50_000, lengthMs: len, scrubbing: false))
+    }
+
+    func testNoCardWithoutNextDismissedOrShortItem() {
+        XCTAssertFalse(NextCardRule.visible(current: false, hasNext: false, dismissed: false, timeMs: len - 1_000, lengthMs: len, scrubbing: false))
+        XCTAssertFalse(NextCardRule.visible(current: false, hasNext: true, dismissed: true, timeMs: len - 1_000, lengthMs: len, scrubbing: false))
+        XCTAssertFalse(NextCardRule.visible(current: false, hasNext: true, dismissed: false, timeMs: 90_000, lengthMs: 100_000, scrubbing: false))
+    }
+}
+
+final class ResumeRuleTests: XCTestCase {
+    func testSavesUnderTheSessionOnScreen() {
+        let s = PlaybackSession(id: 3, key: "ep3")
+        XCTAssertEqual(ResumeRule.save(screen: s, engineSessionId: 3, timeMs: 61_000, lengthMs: 2_700_000),
+                       ResumeSave(key: "ep3", positionS: 61, durationS: 2700))
+    }
+
+    func testNeverSavesPreviousEpisodeNumbersUnderTheNextKey() {
+        // Screen already shows episode 4 (session 4) but the engine numbers still belong to episode 3.
+        let next = PlaybackSession(id: 4, key: "ep4")
+        XCTAssertNil(ResumeRule.save(screen: next, engineSessionId: 3, timeMs: 2_650_000, lengthMs: 2_700_000))
+    }
+
+    func testFreshItemReadingZeroDoesNotWipeResume() {
+        let s = PlaybackSession(id: 5, key: "film")
+        XCTAssertNil(ResumeRule.save(screen: s, engineSessionId: 5, timeMs: 0, lengthMs: 5_400_000))
+        XCTAssertNil(ResumeRule.save(screen: s, engineSessionId: 5, timeMs: 30_000, lengthMs: 0))
+        XCTAssertNil(ResumeRule.save(screen: nil, engineSessionId: 5, timeMs: 30_000, lengthMs: 5_400_000))
+    }
+
+    func testPeriodicDue() {
+        XCTAssertFalse(ResumeRule.periodicDue(lastSavedAtMs: nil, timeMs: 5_000))
+        XCTAssertTrue(ResumeRule.periodicDue(lastSavedAtMs: nil, timeMs: 10_000))
+        XCTAssertFalse(ResumeRule.periodicDue(lastSavedAtMs: 20_000, timeMs: 25_000))
+        XCTAssertTrue(ResumeRule.periodicDue(lastSavedAtMs: 20_000, timeMs: 30_500))
+        XCTAssertTrue(ResumeRule.periodicDue(lastSavedAtMs: 600_000, timeMs: 30_000))   // seeked back
+    }
+
+    func testStartPosition() {
+        XCTAssertNil(ResumeRule.startPosition(stored: nil))
+        XCTAssertNil(ResumeRule.startPosition(stored: 10))
+        XCTAssertEqual(ResumeRule.startPosition(stored: 125), 125)
+    }
+}
+
+final class PauseRuleTests: XCTestCase {
+    func testCommandsShareOneState() {
+        XCTAssertTrue(PauseRule.apply(.pause, viewerPaused: false))
+        XCTAssertFalse(PauseRule.apply(.play, viewerPaused: true))
+        XCTAssertTrue(PauseRule.apply(.toggle, viewerPaused: false))
+        XCTAssertFalse(PauseRule.apply(.toggle, viewerPaused: true))
+        XCTAssertTrue(PauseRule.apply(.pause, viewerPaused: true))      // repeated pause stays paused
+    }
+}
+
+/// Mutable flag shared with async closures (a captured `var` cannot be mutated from a Task).
+final class Flag { var on = false }
+
+final class SessionAndDelayedTests: XCTestCase {
+    func testNewSessionInvalidatesOld() {
+        let g = SessionGate()
+        let a = g.begin(key: "ep3")
+        XCTAssertTrue(g.isCurrent(a.id))
+        let b = g.begin(key: "ep4")
+        XCTAssertFalse(g.isCurrent(a.id))
+        XCTAssertTrue(g.isCurrent(b.id))
+        g.end()
+        XCTAssertFalse(g.isCurrent(b.id))
+        XCTAssertFalse(g.isCurrent(nil))
+    }
+
+    func testDelayedRunsForCurrentSession() async {
+        let g = SessionGate()
+        let s = g.begin(key: "x")
+        let ran = Flag()
+        let r = await Delayed.run(after: 10_000_000, stillValid: { g.isCurrent(s.id) }) { ran.on = true }
+        XCTAssertTrue(r); XCTAssertTrue(ran.on)
+    }
+
+    func testDelayedSkipsStaleSession() async {
+        let g = SessionGate()
+        let s = g.begin(key: "ep3")
+        let ran = Flag()
+        let t = Task { await Delayed.run(after: 50_000_000, stillValid: { g.isCurrent(s.id) }) { ran.on = true } }
+        _ = g.begin(key: "ep4")          // next episode opened while the old task sleeps
+        let r = await t.value
+        XCTAssertFalse(r); XCTAssertFalse(ran.on)
+    }
+
+    func testDelayedSkipsWhenCancelled() async {
+        let ran = Flag()
+        let t = Task { await Delayed.run(after: 200_000_000, stillValid: { true }) { ran.on = true } }
+        t.cancel()                        // player closed
+        let r = await t.value
+        XCTAssertFalse(r); XCTAssertFalse(ran.on)
+    }
+}

@@ -34,25 +34,32 @@ final class PlayerModel: ObservableObject {
     @Published var timeMs: Int32 = 0
     @Published var lengthMs: Int32 = 0
     @Published var playing = false
-    /// Spinner: only when the picture is really not moving (VLC reports "buffering" all the time while playing).
+    /// Spinner = the playback clock stopped moving (see StallDetector in PlaybackLogic).
     @Published var buffering = true
-    /// The stream stopped by itself (server dropped it or it never opened).
+    /// Live stream stopped, or the engine reported an error.
     @Published var failed = false
-    @Published var ended = false
+    /// Set once when a film/episode reaches the engine's end: finished, or stopped before the end.
+    @Published var endDecision: EndDecision?
+    /// The viewer's pause, shared by on-screen buttons and Control Center.
+    @Published private(set) var viewerPaused = false
+    /// Session whose numbers the engine is reporting (set when an item is opened).
+    private(set) var engineSessionId: Int?
+    /// Last clock seen while the item was really playing (the clock can read 0 after the end).
+    private(set) var lastPlayingMs: Int32 = 0
     @Published var rate: Float = 1
     @Published var videoHeight: Int = 0
     @Published var subDelay: Double = 0
     private var timer: Timer?
     private var live = false
-    private var lastTime: Int32 = -1
-    private var stalledTicks = 0
-    private var userPaused = false
+    private var stall = StallDetector()
 
-    func open(_ url: String, startSeconds: Double = 0, live: Bool = false) {
+    func open(_ url: String, startSeconds: Double = 0, live: Bool = false, session: Int) {
+        engineSessionId = session
         guard let u = URL(string: url) else { failed = true; return }
         self.live = live
-        failed = false; ended = false; userPaused = false
-        subDelay = 0; lastTime = -1; stalledTicks = 0; buffering = true; timeMs = 0; lengthMs = 0
+        failed = false; endDecision = nil; viewerPaused = false
+        subDelay = 0; stall.reset(); buffering = true; timeMs = 0; lengthMs = 0
+        lastPlayingMs = Int32(max(0, startSeconds) * 1000)
         let m = VLCMedia(url: u)
         m.addOption(":network-caching=1500")
         if startSeconds > 5 { m.addOption(":start-time=\(Int(startSeconds))") }
@@ -66,17 +73,30 @@ final class PlayerModel: ObservableObject {
     private func tick() {
         // Written so it compiles whether VLCKit imports these as optional or not.
         let t = (player.time as VLCTime?)?.intValue ?? 0
+        let len = (player.media as VLCMedia?)?.length.intValue ?? 0
+        let st = Self.map(player.state)
         timeMs = t
-        lengthMs = (player.media as VLCMedia?)?.length.intValue ?? 0
+        if len > 0 { lengthMs = len }
         playing = player.isPlaying
-        let st = player.state
-        stalledTicks = (t != lastTime) ? 0 : stalledTicks + 1
-        lastTime = t
+        if st == .playing || st == .buffering, t > 0 { lastPlayingMs = t }
         if st == .error || (live && st == .ended) { failed = true }
-        if !live && st == .ended { ended = true }
-        buffering = !userPaused && !failed && !ended && st != .paused && st != .stopped && (st == .opening || stalledTicks >= 3)
+        if !live, st == .ended, endDecision == nil { endDecision = EndRule.onEnded(lastTimeMs: lastPlayingMs, lengthMs: lengthMs) }
+        buffering = !failed && endDecision == nil && stall.sample(timeMs: t, state: st, viewerPaused: viewerPaused)
         let h = Int(player.videoSize.height)
         if h > 0 && h != videoHeight { videoHeight = h }
+    }
+
+    private static func map(_ s: VLCMediaPlayerState) -> EngineState {
+        switch s {
+        case .opening: return .opening
+        case .buffering: return .buffering
+        case .playing: return .playing
+        case .paused: return .paused
+        case .stopped: return .stopped
+        case .ended: return .ended
+        case .error: return .error
+        default: return .buffering
+        }
     }
 
     var quality: String? {
@@ -107,15 +127,18 @@ final class PlayerModel: ObservableObject {
         }
     }
 
-    func toggle() {
-        if player.isPlaying { player.pause(); userPaused = true } else { player.play(); userPaused = false }
-        playing = !userPaused
+    /// The only way to play/pause: on-screen buttons and Control Center both come here.
+    func command(_ c: PauseCommand) {
+        viewerPaused = PauseRule.apply(c, viewerPaused: viewerPaused)
+        if viewerPaused { player.pause() } else { player.play() }
+        playing = !viewerPaused
+        stall.reset()
     }
     func jump(_ seconds: Int32) { seek(toMs: Int32(max(0, Int(timeMs) + Int(seconds) * 1000))) }
     func seek(toMs ms: Int32) {
         let target = lengthMs > 0 ? min(ms, lengthMs - 1000) : ms
         player.time = VLCTime(int: max(0, target))
-        timeMs = max(0, target); stalledTicks = 0
+        timeMs = max(0, target); stall.reset()
     }
 
     /// App volume 0…200 (100 = normal).
@@ -124,7 +147,7 @@ final class PlayerModel: ObservableObject {
         set { if let a = player.audio as VLCAudio? { a.volume = max(0, min(200, newValue)) } }
     }
 
-    func stop() { timer?.invalidate(); timer = nil; player.stop(); clearRemote() }
+    func stop() { timer?.invalidate(); timer = nil; engineSessionId = nil; player.stop(); clearRemote() }
 
     /// Subtitle delay in seconds (VLC stores microseconds). Positive = later.
     func shiftSubs(_ d: Double) {
@@ -157,9 +180,9 @@ final class PlayerModel: ObservableObject {
         guard remoteTargets.isEmpty else { return }
         let c = MPRemoteCommandCenter.shared()
         remoteTargets = [
-            c.playCommand.addTarget { [weak self] _ in self?.player.play(); return .success },
-            c.pauseCommand.addTarget { [weak self] _ in self?.player.pause(); return .success },
-            c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success },
+            c.playCommand.addTarget { [weak self] _ in self?.command(.play); return .success },
+            c.pauseCommand.addTarget { [weak self] _ in self?.command(.pause); return .success },
+            c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.command(.toggle); return .success },
         ]
     }
     private func clearRemote() {
@@ -204,9 +227,14 @@ struct PlayerScreen: View {
     @State private var level: (icon: String, value: Double)?
     @State private var sheet: Sheet?
     @State private var resumeAt: Double?       // seconds; shows the "from the start" chip
-    @State private var nextCountdown: Int?
-    @State private var nextCancelled = false
-    @State private var countdownTask: Task<Void, Never>?
+    @State private var nextVisible = false
+    @State private var nextDismissed = false
+    @State private var stoppedEarlyAt: Int32?   // ms; panel "stopped before the end"
+    @State private var gate = SessionGate()
+    @State private var session: PlaybackSession?
+    @State private var lastSavedAtMs: Int32?
+    @State private var resumeTask: Task<Void, Never>?
+    @Environment(\.scenePhase) private var scenePhase
 
     enum GestureKind { case seek, brightness, volume }
     enum Sheet: String, Identifiable { case subs, channels, episodes; var id: String { rawValue } }
@@ -245,13 +273,14 @@ struct PlayerScreen: View {
                     overlay(geo.size)
                 }
                 if let r = resumeAt, !locked { resumeChip(r) }
-                if let n = nextUp, showNextCard, !locked { nextCard(n) }
+                if let n = nextUp, nextVisible, !nextDismissed, !locked, stoppedEarlyAt == nil { nextCard(n) }
                 if let notice {
                     Text(notice).font(.callout).padding(.horizontal, 14).padding(.vertical, 9)
                         .background(.black.opacity(0.75), in: Capsule()).foregroundStyle(.white)
                         .frame(maxHeight: .infinity, alignment: .top).padding(.top, 64).allowsHitTesting(false)
                 }
                 if model.failed { failedPanel }
+                if let at = stoppedEarlyAt { stoppedEarlyPanel(at) }
             }
         }
         .statusBarHidden(true)
@@ -264,19 +293,28 @@ struct PlayerScreen: View {
                 ChannelPickerSheet(channels: channels, current: index) { i in sheet = nil; switchChannel(to: i) }
                     .environmentObject(library).environmentObject(epg)
             case .episodes:
-                EpisodePickerSheet(queue: queue, current: index) { i in sheet = nil; playEpisode(i, markWatched: false) }
+                EpisodePickerSheet(queue: queue, current: index) { i in sheet = nil; playEpisode(i) }
             }
         }
-        .onReceive(model.$timeMs) { _ in
-            if !isLive { model.nowPlaying(title) }
-            updateNextCard()
+        .onReceive(model.$timeMs) { t in
+            guard !isLive else { return }
+            model.nowPlaying(title)
+            nextVisible = NextCardRule.visible(current: nextVisible, hasNext: nextUp != nil, dismissed: nextDismissed,
+                                               timeMs: t, lengthMs: model.lengthMs, scrubbing: scrub != nil)
+            if model.playing, ResumeRule.periodicDue(lastSavedAtMs: lastSavedAtMs, timeMs: t) { saveResume() }
         }
-        .onReceive(model.$ended) { e in
-            guard e, !isLive else { return }
-            if nextUp != nil && !nextCancelled { playEpisode(index + 1, markWatched: true) } else { saveResume(finished: true); dismiss() }
+        .onReceive(model.$endDecision) { d in
+            guard let d, !isLive else { return }
+            handleEnd(d)
         }
+        .onChange(of: scenePhase) { p in if p != .active { saveResume() } }
         .onAppear { start(); Orientation.landscape(); UIApplication.shared.isIdleTimerDisabled = true }
-        .onDisappear { saveResume(); model.stop(); Orientation.portrait(); UIApplication.shared.isIdleTimerDisabled = false }
+        .onDisappear {
+            saveResume()
+            hideTask?.cancel(); resumeTask?.cancel()
+            gate.end(); session = nil
+            model.stop(); Orientation.portrait(); UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 
     // MARK: Touch: tap = controls, double tap sides = ±10 s, swipe sideways = seek, up/down = brightness (left) / volume (right)
@@ -389,7 +427,7 @@ struct PlayerScreen: View {
             } else {
                 bigButton("gobackward.10", 38) { model.jump(-10); scheduleHide() }
             }
-            Button { model.toggle(); scheduleHide() } label: {
+            Button { model.command(.toggle); scheduleHide() } label: {
                 Image(systemName: model.playing ? "pause.fill" : "play.fill").font(.system(size: 40))
                     .frame(width: 84, height: 84).background(.white.opacity(0.18), in: Circle())
             }
@@ -425,8 +463,8 @@ struct PlayerScreen: View {
                 if !queue.isEmpty && current?.season != nil {
                     pill("الحلقات", "list.bullet") { sheet = .episodes }
                 }
-                if prevUp != nil { pill("السابقة", "backward.end") { playEpisode(index - 1, markWatched: false) } }
-                if nextUp != nil { pill("التالية", "forward.end") { playEpisode(index + 1, markWatched: true) } }
+                if prevUp != nil { pill("السابقة", "backward.end") { playEpisode(index - 1) } }
+                if nextUp != nil { pill("التالية", "forward.end") { playEpisode(index + 1) } }
             }
         }
         .padding(.horizontal, 16).padding(.bottom, 10)
@@ -470,6 +508,19 @@ struct PlayerScreen: View {
         .padding(20).background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white)
     }
 
+    private func stoppedEarlyPanel(_ at: Int32) -> some View {
+        VStack(spacing: 12) {
+            Text("توقّف الملف قبل نهايته عند \(fmt(at))").font(.headline)
+            Text("حُفظ مكانك، ولم تُعلَّم الحلقة كمكتملة.").font(.caption).opacity(0.85)
+            HStack {
+                Button("إعادة المحاولة من نفس النقطة") { retryFrom(at) }.buttonStyle(.borderedProminent)
+                if nextUp != nil { Button("الحلقة التالية") { playEpisode(index + 1) }.buttonStyle(.bordered) }
+                Button("إغلاق") { dismiss() }.buttonStyle(.bordered)
+            }
+        }
+        .padding(20).background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white)
+    }
+
     private func resumeChip(_ seconds: Double) -> some View {
         HStack(spacing: 10) {
             Text("استكمال من \(fmt(Int32(seconds * 1000)))").font(.callout)
@@ -482,18 +533,15 @@ struct PlayerScreen: View {
         .environment(\.layoutDirection, .leftToRight)
     }
 
-    private var showNextCard: Bool { nextCountdown != nil && !nextCancelled }
-
+    /// Information only: the next episode starts by itself only after a real end, or when "Play now" is tapped.
     private func nextCard(_ n: VodPlay) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("الحلقة التالية").font(.caption).opacity(0.8)
+            Text("الحلقة التالية — تبدأ عند انتهاء هذه (\(fmt(max(0, model.lengthMs - model.timeMs))))").font(.caption).opacity(0.8)
             Text(n.title).font(.headline).lineLimit(2)
             HStack {
-                Button { playEpisode(index + 1, markWatched: true) } label: {
-                    Label("شغّل الآن (\(nextCountdown ?? 0))", systemImage: "play.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                Button("إلغاء") { nextCancelled = true; countdownTask?.cancel(); nextCountdown = nil }.buttonStyle(.bordered)
+                Button { playEpisode(index + 1) } label: { Label("شغّل الآن", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent)
+                Button("إخفاء") { nextDismissed = true }.buttonStyle(.bordered)
             }
         }
         .padding(16).frame(maxWidth: 330, alignment: .leading)
@@ -603,90 +651,113 @@ struct PlayerScreen: View {
 
     private func start() {
         switch item {
-        case .live(let l, let i):
-            index = i; model.open(l[i].url, live: true); epg.load(l[i], from: library.xtream)
+        case .live(_, let i):
+            index = i; openLive()
         case .vod(let l, let i):
             index = i; openVod(l[i])
         }
         scheduleHide()
     }
 
-    private func openVod(_ v: VodPlay) {
-        let pos = Store.position(v.key)?.pos ?? 0
-        model.open(v.url, startSeconds: pos)
+    private func openLive() {
+        let ch = channels[index]
+        let s = gate.begin(key: "live:" + ch.id)
+        session = s
+        model.open(ch.url, live: true, session: s.id)
         if fit != .fit { model.apply(fit) }
-        nextCountdown = nil; nextCancelled = false; countdownTask?.cancel()
-        resumeAt = pos > 15 ? pos : nil
+        epg.load(ch, from: library.xtream)
+    }
+
+    /// Opens a film/episode as a new session: older tasks and saves can no longer touch it.
+    private func openVod(_ v: VodPlay, from start: Double? = nil) {
+        let s = gate.begin(key: v.key)
+        session = s
+        lastSavedAtMs = nil
+        stoppedEarlyAt = nil
+        nextVisible = false; nextDismissed = false
+        let pos = start ?? ResumeRule.startPosition(stored: Store.position(v.key)?.pos) ?? 0
+        model.open(v.url, startSeconds: pos, session: s.id)
+        if fit != .fit { model.apply(fit) }
+        resumeTask?.cancel()
+        resumeAt = (start == nil && pos > 0) ? pos : nil
         if resumeAt != nil {
-            let k = v.key
-            Task { try? await Task.sleep(nanoseconds: 8_000_000_000); await MainActor.run { if current?.key == k { resumeAt = nil } } }
+            let id = s.id
+            resumeTask = Task { _ = await Delayed.run(after: 8_000_000_000, stillValid: { await MainActor.run { gate.isCurrent(id) } }) {
+                await MainActor.run { resumeAt = nil }
+            } }
         }
     }
 
     private func switchChannel(to i: Int) {
         guard !channels.isEmpty else { return }
         index = (i + channels.count) % channels.count
-        model.open(channels[index].url, live: true)
-        if fit != .fit { model.apply(fit) }
-        epg.load(channels[index], from: library.xtream)
+        openLive()
         show(channels[index].name)
         scheduleHide()
     }
 
-    private func playEpisode(_ i: Int, markWatched: Bool) {
+    /// Manual move to another episode: saves where this one stopped; marks it watched only if it is
+    /// really at its end (EndRule), never just because the viewer skipped.
+    private func playEpisode(_ i: Int) {
         guard queue.indices.contains(i) else { return }
-        if markWatched, let c = current { Store.setPosition(c.key, 1, 1) } else { saveResume() }
+        if let c = current, stoppedEarlyAt == nil, EndRule.isComplete(timeMs: model.timeMs, lengthMs: model.lengthMs) {
+            Store.setPosition(c.key, 1, 1)
+        } else {
+            saveResume()
+        }
         index = i
         openVod(queue[i])
         show(queue[i].title)
         scheduleHide()
     }
 
-    /// Next-episode card: last 40 s of the episode, 15 s countdown, then the next one starts.
-    private func updateNextCard() {
-        guard !isLive, nextUp != nil, !nextCancelled, model.lengthMs > 120_000 else { return }
-        let left = model.lengthMs - model.timeMs
-        if left < 40_000 && left > 0 && nextCountdown == nil && scrub == nil {
-            nextCountdown = 15
-            countdownTask?.cancel()
-            countdownTask = Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    let done = await MainActor.run { () -> Bool in
-                        guard let c = nextCountdown, !nextCancelled else { return true }
-                        if !model.playing { return false }      // paused: hold the countdown
-                        if c <= 1 { playEpisode(index + 1, markWatched: true); return true }
-                        nextCountdown = c - 1; return false
-                    }
-                    if done { break }
-                }
+    /// Engine end of a film/episode.
+    private func handleEnd(_ d: EndDecision) {
+        guard let c = current else { return }
+        switch d {
+        case .finished:
+            Store.setPosition(c.key, 1, 1)
+            if nextUp != nil && !nextDismissed { playEpisode(index + 1) } else { dismiss() }
+        case .stoppedEarly:
+            let at = model.lastPlayingMs
+            if let save = ResumeRule.save(screen: session, engineSessionId: model.engineSessionId, timeMs: at, lengthMs: model.lengthMs) {
+                Store.setPosition(save.key, save.positionS, save.durationS)
             }
-        } else if left >= 45_000 && nextCountdown != nil {
-            countdownTask?.cancel(); nextCountdown = nil      // viewer seeked back
+            stoppedEarlyAt = at
+            controls = true
         }
+    }
+
+    private func retryFrom(_ at: Int32) {
+        guard let v = current else { return }
+        openVod(v, from: Double(at) / 1000)
+        scheduleHide()
     }
 
     /// One manual retry, started by the viewer (no automatic reconnect loop).
     private func retry() {
-        if isLive { model.open(channels[index].url, live: true) }
-        else if let v = current { model.open(v.url, startSeconds: Double(model.timeMs) / 1000) }
-        if fit != .fit { model.apply(fit) }
+        if isLive { openLive() }
+        else if let v = current { openVod(v, from: Double(model.lastPlayingMs) / 1000) }
         scheduleHide()
     }
 
-    private func saveResume(finished: Bool = false) {
-        guard let v = current else { return }
-        if finished { Store.setPosition(v.key, 1, 1); return }
-        guard model.lengthMs > 0 else { return }
-        Store.setPosition(v.key, Double(model.timeMs) / 1000, Double(model.lengthMs) / 1000)
+    /// Saves the resume point of the session on screen, only with numbers that belong to it.
+    private func saveResume() {
+        guard !isLive, stoppedEarlyAt == nil,
+              let save = ResumeRule.save(screen: session, engineSessionId: model.engineSessionId, timeMs: model.timeMs, lengthMs: model.lengthMs)
+        else { return }
+        Store.setPosition(save.key, save.positionS, save.durationS)
+        lastSavedAtMs = model.timeMs
     }
 
     private func scheduleHide() {
         hideTask?.cancel()
         guard controls else { return }
+        let id = session?.id
         hideTask = Task {
-            try? await Task.sleep(nanoseconds: 4_500_000_000)
-            if !Task.isCancelled { await MainActor.run { if sheet == nil { withAnimation { controls = false } } } }
+            _ = await Delayed.run(after: 4_500_000_000, stillValid: { await MainActor.run { gate.isCurrent(id) } }) {
+                await MainActor.run { if sheet == nil && stoppedEarlyAt == nil && !model.failed { withAnimation { controls = false } } }
+            }
         }
     }
 

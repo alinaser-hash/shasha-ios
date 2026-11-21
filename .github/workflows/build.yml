@@ -23,6 +23,8 @@ jobs:
           set -o pipefail
           {
             echo "== xcode"; xcodebuild -version
+            echo "== unit tests (PlaybackLogic)"
+            swift test --package-path Logic
             brew install xcodegen
             xcodegen generate
             pod install --repo-update
@@ -52,7 +54,7 @@ jobs:
         run: |
           {
             echo "run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA outcome=${{ steps.build.outcome }}"
-            echo "== errors"; grep -E "error:|fatal error|Undefined symbol|ld: |\*\* BUILD|\[!\]" all.log | head -200 || true
+            echo "== errors"; grep -E "error:|fatal error|Undefined symbol|ld: |\*\* BUILD|\[!\]|failed \(|Executed [0-9]+ test" all.log | head -200 || true
             echo "== tail"; tail -60 all.log || true
           } > ci-summary.txt
           git config user.name "shasha-ci"; git config user.email "ci@users.noreply.github.com"
