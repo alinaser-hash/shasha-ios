@@ -876,6 +876,11 @@ struct PlayerScreen: View {
                 panelHeader("ألوان HDR / Dolby Vision")
                 panelRow("فتح بمحرّك mpv (تجريبي)", icon: "bolt.horizontal.circle") { closePanel(); openMPV() }
                 panelRow("فتح بمشغّل Apple", icon: "apple.logo") { closePanel(); openApplePlayer() }
+                panelHeader("mpv بوضع اختبار (لملف ينهار قبل ما يفتح)")
+                ForEach(MPVLab.allCases.filter { $0 != .normal }, id: \.self) { m in
+                    panelRow(m.rawValue, icon: "flask") { closePanel(); openMPV(m) }
+                }
+                panelNote("كل وضع يغيّر عاملًا واحدًا فقط، وللمرة هذي بس. إذا انهار، افتح التشخيص واضغط «نسخ».")
                 panelNote("بعض ملفات Dolby Vision تطلع خضراء أو بنفسجية في VLC لأنه لا يفك هذا النوع. مشغّل Apple يعرضها بألوانها الصحيحة ويدعم AirPlay، لكنه لا يفتح ملفات MKV.")
             }
             panelRow("تشخيص التشغيل", icon: "stethoscope") { openPanel(.diag) }
@@ -1059,12 +1064,12 @@ struct PlayerScreen: View {
 
     // MARK: mpv hand-off (stage 1 of the engine change)
 
-    private func openMPV() {
+    private func openMPV(_ lab: MPVLab = .normal) {
         guard let v = current, let url = URL(string: v.url) else { return }
         saveResume()
         let start = Double(model.timeMs) / 1000
         model.stop()        // one connection per account on many providers
-        MPVLab.current = .normal   // a lab mode never carries over to the next hand-off
+        MPVLab.current = lab       // a lab mode never carries over to the next hand-off
         DiagLog.shared.note(String(format: "[التطبيق] تسليم إلى mpv عند %.0f ث", start))
         mpvPlayback = MPVPlayback(url: url, title: v.title, start: start)
     }

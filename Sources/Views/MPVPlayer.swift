@@ -10,6 +10,7 @@ import Libmpv
 enum MPVLab: String, CaseIterable {
     case normal = "عادي (gpu-next + فك عتادي)"
     case voGPU = "مخرج vo=gpu بدل gpu-next"
+    case copyHwdec = "فك عتادي بالنسخ (videotoolbox-copy)"
     case noHwdec = "بدون فك عتادي (hwdec=no)"
     /// Memory only (0.8.4): 0.8.3 saved the choice, so a mode that crashes mpv stayed on for every later
     /// file with no way back. Now every hand-off starts in normal mode, and the old saved value is erased.
@@ -91,7 +92,7 @@ final class MPVController: UIViewController {
         set("vo", lab == .voGPU ? "gpu" : "gpu-next")
         set("gpu-api", "vulkan")
         set("gpu-context", "moltenvk")
-        set("hwdec", lab == .noHwdec ? "no" : "videotoolbox")
+        set("hwdec", lab == .noHwdec ? "no" : lab == .copyHwdec ? "videotoolbox-copy" : "videotoolbox")
         set("video-rotate", "no")
         set("keep-open", "yes")                 // stay on the last frame; the app decides what happens at the end
         set("cache", "yes")
