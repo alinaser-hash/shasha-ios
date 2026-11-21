@@ -93,7 +93,7 @@ final class PlayerModel: ObservableObject {
         failed = false; endDecision = nil; viewerPaused = false; hasPlayed = false
         subDelay = 0; stall.reset(); buffering = true; timeMs = 0; lengthMs = 0
         lastPlayingMs = Int32(max(0, startSeconds) * 1000)
-        let m = VLCMedia(url: u)
+        guard let m = VLCMedia(url: u) else { failed = true; return }
         m.addOption(":network-caching=1500")
         if !PlayerPrefs.audio.isEmpty { m.addOption(":audio-language=" + PlayerPrefs.audio) }
         if !PlayerPrefs.subs.isEmpty { m.addOption(":sub-language=" + PlayerPrefs.subs) }
