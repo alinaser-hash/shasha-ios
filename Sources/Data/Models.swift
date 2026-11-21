@@ -40,7 +40,9 @@ struct Programme: Identifiable, Hashable {
     var isNow: Bool { start <= Date() && Date() < end }
     var isPast: Bool { end <= Date() }
     var minutes: Int { max(1, Int(end.timeIntervalSince(start) / 60)) }
-}: Identifiable, Hashable {
+}
+
+struct Movie: Identifiable, Hashable {
     let id: String
     let name: String
     let poster: String?
