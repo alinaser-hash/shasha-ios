@@ -892,6 +892,13 @@ struct PlayerScreen: View {
                 }
             }
             .padding(.horizontal, 8).padding(.vertical, 6)
+            if let last = MPVSessionFile.previous() {
+                panelRow("نسخ سجل آخر جلسة mpv", icon: "bolt.horizontal.circle") {
+                    UIPasteboard.general.string = "شاشة — سجل آخر جلسة mpv (الروابط وبيانات الحساب محذوفة)\n" + last
+                    show("تم نسخ سجل mpv")
+                }
+                panelNote("يُكتب سطرًا بسطر أثناء تشغيل mpv، فيبقى حتى لو انهار التطبيق. إذا آخر سطر ليس «إغلاق طبيعي» فالجلسة انقطعت عند تلك المرحلة.")
+            }
             panelRow(diagDetailed ? "تسجيل مفصّل: مفعّل" : "تسجيل مفصّل (لفحص الترجمة)", selected: diagDetailed, icon: "list.bullet.rectangle") {
                 diagDetailed.toggle()
                 DiagLog.shared.level = diagDetailed ? .debug : .warning

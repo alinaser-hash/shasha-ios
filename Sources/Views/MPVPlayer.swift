@@ -16,6 +16,8 @@ struct MPVPlayback: Identifiable {
 
 /// MoltenVK workarounds taken from MPVKit's demo (drawable 1x1 flicker; EDR flag must be set on the main thread).
 final class MPVMetalLayer: CAMetalLayer {
+    /// Breadcrumb hook (set by the controller) so the session file shows whether the HDR surface was requested.
+    static var onEDR: ((String) -> Void)?
     override var drawableSize: CGSize {
         get { super.drawableSize }
         set { if Int(newValue.width) > 1 && Int(newValue.height) > 1 { super.drawableSize = newValue } }
@@ -23,8 +25,11 @@ final class MPVMetalLayer: CAMetalLayer {
     override var wantsExtendedDynamicRangeContent: Bool {
         get { super.wantsExtendedDynamicRangeContent }
         set {
+            MPVMetalLayer.onEDR?("EDR=\(newValue) من \(Thread.isMainThread ? "الواجهة" : "خيط mpv")")
             if Thread.isMainThread { super.wantsExtendedDynamicRangeContent = newValue }
-            else { DispatchQueue.main.sync { super.wantsExtendedDynamicRangeContent = newValue } }
+            // async, not sync (0.8.2): the demo's main.sync can deadlock when the main thread is itself waiting
+            // inside an mpv call (our 0.5 s property reads) while the video thread sets up an HDR/Dolby Vision surface.
+            else { DispatchQueue.main.async { super.wantsExtendedDynamicRangeContent = newValue } }
         }
     }
 }
@@ -59,9 +64,12 @@ final class MPVController: UIViewController {
     }
 
     private func start() {
+        MPVSessionFile.begin(secrets: MPVSessionFile.secrets(of: playback.url))
+        MPVMetalLayer.onEDR = { [weak self] in self?.note("[مرحلة] \($0)") }
+        note("[مرحلة] إنشاء mpv | البداية عند \(Int(playback.start)) ث")
         guard let h = mpv_create() else { note("mpv_create failed"); return }
         mpv = h
-        mpv_request_log_messages(h, "warn")
+        mpv_request_log_messages(h, "info")
         var layerPtr = metal
         set("wid", int64Pointer: &layerPtr)
         set("vo", "gpu-next")
@@ -80,10 +88,12 @@ final class MPVController: UIViewController {
         let pref = PlayerPrefs.audio
         if pref.contains("ara") { set("alang", "ar,ara,arabic") } else if pref.contains("eng") { set("alang", "en,eng,english") }
         check(mpv_initialize(h), "initialize")
+        note("[مرحلة] تمت التهيئة")
         mpv_set_wakeup_callback(h, { ctx in
             guard let ctx else { return }
             Unmanaged<MPVController>.fromOpaque(ctx).takeUnretainedValue().drainEvents()
         }, Unmanaged.passUnretained(self).toOpaque())
+        note("[مرحلة] فتح الملف")
         command(["loadfile", playback.url.absoluteString, "replace"])
         NotificationCenter.default.addObserver(self, selector: #selector(background), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(foreground), name: UIApplication.willEnterForegroundNotification, object: nil)
@@ -96,6 +106,8 @@ final class MPVController: UIViewController {
     func shutdown() {
         NotificationCenter.default.removeObserver(self)
         guard let h = mpv else { return }
+        note("[مرحلة] إغلاق طبيعي")
+        MPVMetalLayer.onEDR = nil
         mpv = nil
         mpv_set_wakeup_callback(h, nil, nil)
         mpv_terminate_destroy(h)
@@ -189,6 +201,10 @@ final class MPVController: UIViewController {
                     } else { reason = "?" }
                     self.note("end-file: \(reason)")
                     DispatchQueue.main.async { self.onEndOfFile?(reason) }
+                case MPV_EVENT_START_FILE: self.note("[مرحلة] بدء الملف")
+                case MPV_EVENT_FILE_LOADED: self.note("[مرحلة] الملف محمّل")
+                case MPV_EVENT_VIDEO_RECONFIG: self.note("[مرحلة] تهيئة مخرج الفيديو")
+                case MPV_EVENT_PLAYBACK_RESTART: self.note("[مرحلة] بدأ العرض")
                 case MPV_EVENT_SHUTDOWN:
                     return
                 default: break
@@ -203,6 +219,7 @@ final class MPVController: UIViewController {
 
     func note(_ s: String) {
         logLock.lock(); log.append(s); if log.count > 300 { log.removeFirst(log.count - 300) }; logLock.unlock()
+        MPVSessionFile.append(s)
     }
 
     func logLines() -> [String] { logLock.lock(); defer { logLock.unlock() }; return log }
@@ -229,6 +246,7 @@ struct MPVPlayerView: View {
     @State private var panel: String?          // "audio" / "sub" / "info"
     @State private var info = ""
     @State private var ended = false
+    @State private var beat = 0
     private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     init(playback: MPVPlayback, onClose: @escaping (Double, Double, Bool) -> Void) {
@@ -249,6 +267,8 @@ struct MPVPlayerView: View {
         .environment(\.layoutDirection, .leftToRight)
         .statusBarHidden(true)
         .onReceive(tick) { _ in
+            beat += 1
+            if beat % 10 == 1 { controller.note(String(format: "[نبض الواجهة] %.0f ث", time)) }
             time = controller.double("time-pos")
             duration = controller.double("duration")
             paused = controller.flag("pause")
@@ -377,5 +397,47 @@ struct MPVPlayerView: View {
     private func fmt(_ s: Double) -> String {
         let t = Int(max(0, s))
         return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%02d:%02d", t / 60, t % 60)
+    }
+}
+
+/// The last mpv session written line by line to a file, so it survives a crash or a forced close and can be
+/// copied from the diagnostics on the next launch. Links and account parts are removed before writing.
+enum MPVSessionFile {
+    private static let lock = NSLock()
+    private static var handle: FileHandle?
+    private static var lines = 0
+    private static var secrets: [String] = []
+    static var url: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("mpv-last-session.log")
+    }
+
+    /// Host, user, password and the other path parts of the stream link.
+    static func secrets(of u: URL) -> [String] {
+        ([u.host, u.user, u.password].compactMap { $0 } + u.pathComponents).filter { $0.count >= 3 && $0 != "movie" && $0 != "series" }
+    }
+
+    static func begin(secrets s: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        try? handle?.close()
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        handle = try? FileHandle(forWritingTo: url)
+        lines = 0
+        secrets = s
+    }
+
+    static func append(_ line: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let h = handle, lines < 3000 else { return }
+        lines += 1
+        let stamp = String(format: "%.3f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))
+        let clean = DiagRule.redact(line, secrets: secrets)
+        if let d = "\(stamp) \(clean)\n".data(using: .utf8) { h.write(d); try? h.synchronize() }
+    }
+
+    /// Text of the previous session (or nil if there is none).
+    static func previous() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let d = try? Data(contentsOf: url), !d.isEmpty else { return nil }
+        return String(decoding: d, as: UTF8.self)
     }
 }
