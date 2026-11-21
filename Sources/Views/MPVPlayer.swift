@@ -109,6 +109,7 @@ final class MPVController: UIViewController {
             note("[مرحلة] خط الترجمة: الخط المرفق غير موجود")
         }
         set("sub-font-size", "46")
+        set("sub-scale", String(format: "%.2f", MPVSubScale.value))   // ASS sizes come from the file; this scales them
         if playback.start > 5 { set("start", String(format: "%.0f", playback.start)) }
         let pref = PlayerPrefs.audio
         if pref.contains("ara") { set("alang", "ar,ara,arabic") } else if pref.contains("eng") { set("alang", "en,eng,english") }
@@ -272,6 +273,7 @@ struct MPVPlayerView: View {
     @State private var info = ""
     @State private var ended = false
     @State private var beat = 0
+    @State private var subScale = MPVSubScale.value
     private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     init(playback: MPVPlayback, onClose: @escaping (Double, Double, Bool) -> Void) {
@@ -371,6 +373,15 @@ struct MPVPlayerView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading).padding(12)
                         } else {
                             let list = controller.tracks(p)
+                            if p == "sub" {
+                                HStack(spacing: 10) {
+                                    Text("حجم الترجمة \(Int((subScale * 100).rounded()))٪").font(.callout)
+                                    Spacer()
+                                    sizeButton("textformat.size.smaller", -0.1)
+                                    sizeButton("textformat.size.larger", 0.1)
+                                }
+                                .padding(12)
+                            }
                             if p == "sub" { row("بدون ترجمة", selected: !list.contains(where: \.selected)) { controller.setProperty("sid", "no"); panel = nil } }
                             if list.isEmpty { Text(p == "sub" ? "لا توجد ترجمة" : "لا توجد مسارات").foregroundStyle(.secondary).padding(12) }
                             ForEach(list) { t in
@@ -417,6 +428,17 @@ struct MPVPlayerView: View {
                  "", "— تحذيرات mpv"]
         l += controller.logLines().suffix(80)
         return DiagRule.redact(l.joined(separator: "\n"), secrets: [])
+    }
+
+    private func sizeButton(_ icon: String, _ step: Double) -> some View {
+        Button {
+            subScale = min(3.0, max(0.5, ((subScale + step) * 10).rounded() / 10))
+            MPVSubScale.value = subScale
+            controller.setProperty("sub-scale", String(format: "%.2f", subScale))
+        } label: {
+            Image(systemName: icon).font(.title3).frame(width: 48, height: 40).background(.white.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 
     /// Reopen the same file at the current position with another lab mode.
@@ -498,5 +520,13 @@ enum MPVFonts {
             do { try fm.copyItem(at: src, to: dst) } catch { return nil }
         }
         return dir.path
+    }
+}
+
+/// The viewer's subtitle size in mpv (a taste, so it is kept between launches). 1.0 = the file's own size.
+enum MPVSubScale {
+    static var value: Double {
+        get { let v = UserDefaults.standard.double(forKey: "mpvSubScale"); return v > 0 ? v : 1.6 }
+        set { UserDefaults.standard.set(newValue, forKey: "mpvSubScale") }
     }
 }
