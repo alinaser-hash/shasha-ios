@@ -98,7 +98,16 @@ final class MPVController: UIViewController {
         set("demuxer-max-bytes", "150MiB")
         set("slang", "ar,ara,arabic")
         set("subs-fallback", "yes")
-        set("sub-font", "Geeza Pro")
+        // 0.8.6: the session log showed libass has no system font provider here ("can't find selected font
+        // provider", then no fallback glyphs), so subtitles were decoded but drawn with no font at all.
+        // Give libass a font of its own: Noto Sans Arabic (SIL OFL, bundled), which also covers Latin.
+        if let dir = MPVFonts.directory() {
+            set("sub-fonts-dir", dir)
+            set("sub-font", "Noto Sans Arabic")
+            note("[مرحلة] خط الترجمة: Noto Sans Arabic من مجلد خاص")
+        } else {
+            note("[مرحلة] خط الترجمة: الخط المرفق غير موجود")
+        }
         set("sub-font-size", "46")
         if playback.start > 5 { set("start", String(format: "%.0f", playback.start)) }
         let pref = PlayerPrefs.audio
@@ -473,5 +482,21 @@ enum MPVSessionFile {
         lock.lock(); defer { lock.unlock() }
         guard let d = try? Data(contentsOf: url), !d.isEmpty else { return nil }
         return String(decoding: d, as: UTF8.self)
+    }
+}
+
+/// A folder holding only the bundled subtitle font (libass reads every file in sub-fonts-dir, so the app
+/// bundle itself can't be used).
+enum MPVFonts {
+    static func directory() -> String? {
+        guard let src = Bundle.main.url(forResource: "NotoSansArabic", withExtension: "ttf") else { return nil }
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("mpv-fonts", isDirectory: true)
+        let dst = dir.appendingPathComponent("NotoSansArabic.ttf")
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dst.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            do { try fm.copyItem(at: src, to: dst) } catch { return nil }
+        }
+        return dir.path
     }
 }
