@@ -135,8 +135,11 @@ final class MPVController: UIViewController {
         guard let h = mpv else { return }
         note("[مرحلة] إغلاق طبيعي")
         MPVMetalLayer.onEDR = nil
-        mpv = nil
         mpv_set_wakeup_callback(h, nil, nil)
+        // 0.9.0: wait for the event queue before destroying. Before, the handle could be destroyed on the main
+        // thread while drainEvents was still inside mpv_wait_event(h) on its own queue (use after free) — a crash
+        // that shows up only sometimes, when going back from mpv to VLC.
+        events.sync { self.mpv = nil }
         mpv_terminate_destroy(h)
     }
 
