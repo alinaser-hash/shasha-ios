@@ -18,7 +18,8 @@ struct MoviesView: View {
                 LoadingOrError()
                 let _ = library.groupsTick
                 let ok = library.allowedFilter(.movies)
-                let cont = library.movies.filter { ok($0.categoryId) && Store.position("movie:" + $0.id) != nil }
+                let _ = tick
+                let cont = continueMovies(library, ok)
                 if !cont.isEmpty && query.isEmpty && cat == nil {
                     Text("متابعة المشاهدة").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -46,6 +47,7 @@ struct MoviesView: View {
             .toolbar { ToolbarItem(placement: .navigationBarLeading) { SortMenu(sort: $sort, mine: $mine) } }
             .refreshable { await library.reload() }
             .onAppear { tick += 1 }
+            .onChange(of: play?.id) { _ in tick += 1 }   // back from the player: refresh "Continue watching"
         }
     }
 
@@ -85,6 +87,28 @@ struct FavButton: View {
         .accessibilityLabel(on ? "إزالة من قائمتي" : "إضافة إلى قائمتي")
         .onAppear { on = Store.isFavorite(key) }
     }
+}
+
+/// Films with a resume point, most recently played first.
+@MainActor func continueMovies(_ library: Library, _ ok: (String) -> Bool) -> [Movie] {
+    let byId = Dictionary(library.movies.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    return Store.recent.compactMap { key -> Movie? in
+        guard key.hasPrefix("movie:"), Store.position(key) != nil, let m = byId[String(key.dropFirst(6))], ok(m.categoryId) else { return nil }
+        return m
+    }.prefix(20).map { $0 }
+}
+
+/// Series with a recently played episode (one entry per series), most recent first.
+@MainActor func continueShows(_ library: Library, _ ok: (String) -> Bool) -> [(show: Show, episodeKey: String)] {
+    let byId = Dictionary(library.shows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    var seen = Set<String>()
+    var out: [(show: Show, episodeKey: String)] = []
+    for key in Store.recent where key.hasPrefix("ep:") {
+        guard let sid = Store.show(forEpisode: key), let s = byId[sid], ok(s.categoryId), seen.insert(sid).inserted else { continue }
+        out.append((s, key))
+        if out.count >= 20 { break }
+    }
+    return out
 }
 
 /// Chip selection that asks for Face ID / passcode before opening a locked group.
@@ -155,6 +179,21 @@ struct SeriesView: View {
                 LoadingOrError()
                 let _ = library.groupsTick
                 let ok = library.allowedFilter(.series)
+                let _ = tick
+                let cont = continueShows(library, ok)
+                if !cont.isEmpty && query.isEmpty && cat == nil {
+                    Text("متابعة المشاهدة").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(cont, id: \.show.id) { c in
+                                NavigationLink { SeriesDetail(show: c.show, play: $play) } label: {
+                                    PosterCard(title: c.show.name, poster: c.show.poster, progress: progress(c.episodeKey)).frame(width: 110)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }.padding(.horizontal)
+                    }
+                }
                 Chips(cats: library.cats(.series), selected: guarded($cat, .series, library), locked: lockedSet(.series, library)).padding(.vertical, 6)
                 let _ = tick
                 let list = sortedShows(library.shows.filter { ok($0.categoryId) && (cat == nil || $0.categoryId == cat) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))
@@ -171,6 +210,7 @@ struct SeriesView: View {
             .toolbar { ToolbarItem(placement: .navigationBarLeading) { SortMenu(sort: $sort, mine: $mine) } }
             .refreshable { await library.reload() }
             .onAppear { tick += 1 }
+            .onChange(of: play?.id) { _ in tick += 1 }   // back from the player: refresh "Continue watching"
         }
     }
 

@@ -19,6 +19,7 @@ struct HomeView: View {
             .navigationTitle("الرئيسية")
             .refreshable { await library.reload() }
             .onAppear { tick += 1 }
+            .onChange(of: play?.id) { _ in tick += 1 }
         }
     }
 
