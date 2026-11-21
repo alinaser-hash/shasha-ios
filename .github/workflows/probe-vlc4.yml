@@ -12,25 +12,24 @@ permissions:
 jobs:
   headers:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
-      - name: Fetch VLCKit 4 and copy its public headers
+      - uses: actions/checkout@v4
+      - name: Install VLCKit 4 into a scratch copy of the project
         run: |
-          mkdir p && cd p
-          cat > Podfile <<'POD'
-          platform :ios, '16.0'
-          install! 'cocoapods', :integrate_targets => false
-          target 'X' do
-            pod 'VLCKit', '4.0.0a18'
-          end
-          POD
-          pod install --repo-update > ../pod.log 2>&1 || true
-          cd ..
-          mkdir -p out
-          cp pod.log out/
-          find p/Pods -path "*ios-arm64/*" -name "*.h" -path "*Headers*" | head -100 > out/list.txt || true
-          for f in $(find p/Pods -path "*ios-arm64/*" -name "*.h" -path "*Headers*"); do cp "$f" out/; done
-          ls out > out/files.txt
+          brew install xcodegen > /dev/null
+          xcodegen generate > /dev/null
+          sed -i '' "s/pod 'MobileVLCKit'.*/pod 'VLCKit', '4.0.0a18'/" Podfile
+          pod install --repo-update > pod.log 2>&1 || true
+      - name: Publish headers
+        if: always()
+        run: |
+          mkdir -p /tmp/out
+          cp pod.log Podfile /tmp/out/ 2>/dev/null || true
+          find Pods -name "*.h" -path "*ios-arm64*" > /tmp/out/list.txt 2>/dev/null || true
+          while read f; do cp "$f" /tmp/out/ 2>/dev/null || true; done < /tmp/out/list.txt
+          ls /tmp/out > /tmp/out/files.txt
+          cd /tmp/out && git init -q
           git config user.name shasha-ci; git config user.email ci@users.noreply.github.com
-          cd out && git init -q && git add -A && git commit -qm headers
+          git add -A && git commit -qm headers
           git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:ci-vlc4
